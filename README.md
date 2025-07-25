@@ -13,6 +13,9 @@ This version represents the culmination of all previous development. It is a com
 7.  **Ultimate "Go-Live" Checklist:** The `README.md` provides an exhaustive, step-by-step guide for deploying and operating the system in a live environment.
 
 This is the complete, final, and definitive version of the project, ready for rigorous testing and deployment.
+GCP meme-snipe-v19-vm	us-central1-a		
+10.128.0.25 (nic0)	34.132.94.145 (nic0)
+Github https://github.com/shinertx/memeversion3
 
 ---
 
