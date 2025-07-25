@@ -1,0 +1,4 @@
+[package]
+name = "position_manager"
+version = "24.0.0"
+edition = "2021"

@@ -1,0 +1,38 @@
+FROM rust:1.75-slim AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
+
+WORKDIR /app
+
+COPY ./Cargo.lock /Cargo.lock
+COPY ./executor/Cargo.toml ./executor/Cargo.toml
+COPY ./shared-models/Cargo.toml ./shared-models/Cargo.toml
+
+RUN mkdir -p executor/src && echo "fn main() {}" > executor/src/main.rs
+RUN mkdir -p shared-models/src && echo "pub fn lib() {}" > shared-models/src/lib.rs
+RUN cargo build --release --workspace
+
+RUN rm executor/src/*.rs shared-models/src/*.rs
+
+COPY ./executor/src ./executor/src
+COPY ./shared-models/src ./shared-models/src
+
+RUN cargo build --release --bin executor
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system app && useradd --system --gid app app
+USER app
+
+WORKDIR /app
+
+COPY --from=builder /app/target/release/executor .
+
+ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
+
+EXPOSE 9184
+
+CMD ["./executor"]

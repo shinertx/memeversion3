@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'executor'
+    static_configs:
+      - targets: ['executor:9184']

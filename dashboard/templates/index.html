@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MemeSnipe v24 Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #030712; color: #f9fafb; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif; }
+        .card { background-color: #111827; border: 1px solid #1f2937; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); }
+        .table-container { max-height: 80vh; overflow-y: auto; }
+        th, td { padding: 0.75rem 1.5rem; }
+        thead th { background-color: #1f2937; position: sticky; top: 0; z-index: 10; }
+        .header-bg { background-color: #0d111b; }
+        .mode-simulating { color: #f59e0b; }
+        .mode-paper { color: #3b82f6; }
+        .mode-live { color: #10b981; }
+    </style>
+    <meta http-equiv="refresh" content="10">
+</head>
+<body class="p-4 sm:p-6 lg:p-8">
+    <div class="max-w-7xl mx-auto">
+        <header class="text-center mb-8 header-bg p-6 rounded-lg">
+            <h1 class="text-4xl font-bold text-purple-400">MemeSnipe v24</h1>
+            <p class="text-slate-400">The Live Simulation Engine</p>
+        </header>
+
+        <!-- Global KPIs -->
+        <section class="grid grid-cols-2 md:grid-cols-4 gap-6 mb-8">
+            <div class="card p-6 rounded-lg text-center">
+                <h3 class="text-lg font-semibold text-slate-400">Total Strategies</h3>
+                <p class="text-4xl font-bold text-white">{{ num_strategies }}</p>
+            </div>
+            <div class="card p-6 rounded-lg text-center">
+                <h3 class="text-lg font-semibold text-slate-400">Active Allocations</h3>
+                <p class="text-4xl font-bold text-white">{{ allocations | length }}</p>
+            </div>
+            <div class="card p-6 rounded-lg text-center">
+                <h3 class="text-lg font-semibold text-slate-400">Global Portfolio PnL</h3>
+                <p class="text-4xl font-bold {% if global_total_pnl > 0 %}text-green-400{% elif global_total_pnl < 0 %}text-red-400{% else %}text-white{% endif %}">${{ "%.2f"|format(global_total_pnl) }}</p>
+            </div>
+            <div class="card p-6 rounded-lg text-center">
+                <h3 class="text-lg font-semibold text-slate-400">Global Win Rate</h3>
+                <p class="text-4xl font-bold text-white">{{ "%.1f"|format(global_win_rate) }}%</p>
+            </div>
+        </section>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-8">
+            <!-- Strategy Registry -->
+            <div class="card p-6 rounded-lg xl:col-span-1">
+                <h2 class="text-2xl font-bold mb-4 text-white">Strategy Registry</h2>
+                <div class="table-container">
+                    <table class="w-full text-sm text-left">
+                        <thead class="text-xs text-slate-400 uppercase">
+                            <tr>
+                                <th scope="col" class="px-6 py-3">Family</th>
+                                <th scope="col" class="px-6 py-3">ID</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% for spec in specs[-10:] %}
+                            <tr class="border-b border-slate-700">
+                                <td class="px-6 py-4 font-medium text-purple-400">{{ spec.family }}</td>
+                                <td class="px-6 py-4 font-mono text-xs text-slate-300">{{ spec.id[-20:] }}</td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Active Allocations & Performance -->
+            <div class="card p-6 rounded-lg lg:col-span-2 xl:col-span-2">
+                <h2 class="text-2xl font-bold mb-4 text-white">Active Allocations & Performance</h2>
+                <div class="table-container">
+                    <table class="w-full text-sm text-left">
+                        <thead class="text-xs text-slate-400 uppercase">
+                            <tr>
+                                <th scope="col" class="px-6 py-3">Strategy ID</th>
+                                <th scope="col" class="px-6 py-3">Weight</th>
+                                <th scope="col" class="px-6 py-3">Sharpe</th>
+                                <th scope="col" class="px-6 py-3">PnL</th>
+                                <th scope="col" class="px-6 py-3">Trades</th>
+                                <th scope="col" class="px-6 py-3">Win Rate</th>
+                                <th scope="col" class="px-6 py-3">Mode</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% for alloc in allocations %}
+                            {% set perf = strategy_performance.get(alloc.id, {'total_pnl': 0, 'trade_count': 0, 'win_rate': 0, 'sharpe_ratio': 0}) %}
+                            <tr class="border-b border-slate-700">
+                                <td class="px-6 py-4 font-mono text-xs text-slate-300">{{ alloc.id[-20:] }}</td>
+                                <td class="px-6 py-4 font-bold text-white">{{ "%.3f"|format(alloc.weight) }}</td>
+                                <td class="px-6 py-4 {% if alloc.sharpe_ratio > 0 %}text-green-400{% elif alloc.sharpe_ratio < 0 %}text-red-400{% else %}text-white{% endif %}">{{ "%.2f"|format(alloc.sharpe_ratio) }}</td>
+                                <td class="px-6 py-4 {% if perf.total_pnl > 0 %}text-green-400{% elif perf.total_pnl < 0 %}text-red-400{% else %}text-white{% endif %}">${{ "%.2f"|format(perf.total_pnl) }}</td>
+                                <td class="px-6 py-4 text-white">{{ perf.trade_count }}</td>
+                                <td class="px-6 py-4 text-white">{{ "%.1f"|format(perf.win_rate) }}%</td>
+                                <td class="px-6 py-4 font-medium mode-{{ alloc.mode|lower }}">{{ alloc.mode }}</td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Trade History (Full Width) -->
+            <div class="card p-6 rounded-lg lg:col-span-2 xl:col-span-3">
+                <h2 class="text-2xl font-bold mb-4 text-white">Recent Trade History</h2>
+                <div class="table-container">
+                    <table class="w-full text-sm text-left">
+                        <thead class="text-xs text-slate-400 uppercase">
+                            <tr>
+                                <th scope="col" class="px-6 py-3">Time</th>
+                                <th scope="col" class="px-6 py-3">Strategy</th>
+                                <th scope="col" class="px-6 py-3">Token</th>
+                                <th scope="col" class="px-6 py-3">Action</th>
+                                <th scope="col" class="px-6 py-3">Size (USD)</th>
+                                <th scope="col" class="px-6 py-3">PnL (USD)</th>
+                                <th scope="col" class="px-6 py-3">Status</th>
+                                <th scope="col" class="px-6 py-3">Confidence</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trade-history-body">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function fetchTradeHistory() {
+            try {
+                const response = await fetch('/api/trades');
+                if (!response.ok) {
+                    console.error("Failed to fetch trades:", response.status);
+                    return;
+                }
+                const trades = await response.json();
+                const tbody = document.getElementById('trade-history-body');
+                tbody.innerHTML = '';
+                
+                trades.slice(0, 50).forEach(trade => {
+                    const tr = document.createElement('tr');
+                    tr.className = 'border-b border-slate-700';
+
+                    const entryTime = new Date(trade.entry_time * 1000).toLocaleString();
+                    const action = trade.side === 'Long' ? 'BUY' : (trade.side === 'Short' ? 'SHORT' : 'UNKNOWN');
+
+                    const pnl = trade.pnl_usd !== null ? `$${trade.pnl_usd.toFixed(2)}` : 'N/A';
+                    const pnlClass = trade.pnl_usd > 0 ? 'text-green-400' : (trade.pnl_usd < 0 ? 'text-red-400' : 'text-white');
+                    const statusClass = trade.status.includes('PROFIT') ? 'text-green-400' : 
+                                        (trade.status.includes('LOSS') ? 'text-red-400' : 
+                                        (trade.status === 'OPEN' ? 'text-yellow-400' : 'text-gray-400'));
+
+                    tr.innerHTML = `
+                        <td class="px-6 py-4 text-slate-300">${entryTime}</td>
+                        <td class="px-6 py-4 text-purple-400 font-mono text-xs">${trade.strategy_id.slice(-20)}</td>
+                        <td class="px-6 py-4 font-medium text-white font-mono text-xs">${trade.token_address.slice(0, 8)}...</td>
+                        <td class="px-6 py-4 text-white">${action}</td>
+                        <td class="px-6 py-4 text-white">$${trade.amount_usd.toFixed(2)}</td>
+                        <td class="px-6 py-4 font-bold ${pnlClass}">${pnl}</td>
+                        <td class="px-6 py-4 font-medium ${statusClass}">${trade.status}</td>
+                        <td class="px-6 py-4 text-slate-300">${trade.confidence.toFixed(2)}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            } catch (error) {
+                console.error("Failed to fetch trade history:", error);
+            }
+        }
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchTradeHistory();
+            setInterval(fetchTradeHistory, 5000); // Update every 5 seconds
+        });
+    </script>
+</body>
+</html>

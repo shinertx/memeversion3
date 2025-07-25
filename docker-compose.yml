@@ -1,0 +1,118 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7.2-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+
+  signer:
+    build: { context: ./signer }
+    restart: unless-stopped
+    environment:
+      - RUST_LOG=${LOG_LEVEL:-info}
+      - WALLET_KEYPAIR_PATH=/app/wallet/${WALLET_KEYPAIR_FILENAME}
+    volumes:
+      - ./${WALLET_KEYPAIR_FILENAME}:/app/wallet/${WALLET_KEYPAIR_FILENAME}:ro
+
+  strategy_factory:
+    build: ./strategy_factory
+    volumes:
+      - ./shared:/app/shared
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - POPULATION_SIZE=${POPULATION_SIZE:-50}
+      - MUTATION_RATE=${MUTATION_RATE:-0.15}
+      - CROSSOVER_RATE=${CROSSOVER_RATE:-0.7}
+      - TOURNAMENT_SIZE=${TOURNAMENT_SIZE:-5}
+      - TOP_SURVIVORS_RATIO=${TOP_SURVIVORS_RATIO:-0.2}
+      - BACKTESTING_PLATFORM_API_KEY=${BACKTESTING_PLATFORM_API_KEY}
+      - BACKTESTING_PLATFORM_URL=${BACKTESTING_PLATFORM_URL:-https://api.heliosprime.com/v1}
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  portfolio_manager:
+    build: ./portfolio_manager
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@postgres:5432/meme_snipe_v25
+      - PROMETHEUS_PORT=9100
+      - REBALANCE_INTERVAL_SECS=${REBALANCE_INTERVAL_SECS:-300}
+      - STRATEGY_PROMOTION_INTERVAL_SECS=${STRATEGY_PROMOTION_INTERVAL_SECS:-900}
+      - HEARTBEAT_INTERVAL_SECS=${HEARTBEAT_INTERVAL_SECS:-60}
+      - MIN_SHARPE_FOR_PROMOTION=${MIN_SHARPE_FOR_PROMOTION:-0.5}
+      - NUM_STRATEGIES_PAPER=${NUM_STRATEGIES_PAPER:-5}
+      - NUM_STRATEGIES_LIVE=${NUM_STRATEGIES_LIVE:-3}
+      - CAPITAL_SCALAR_PAPER=${CAPITAL_SCALAR_PAPER:-1.5}
+      - CAPITAL_SCALAR_LIVE=${CAPITAL_SCALAR_LIVE:-2.0}
+      - GLOBAL_MAX_POSITION_USD=${GLOBAL_MAX_POSITION_USD:-50000}
+      - BACKTESTING_PLATFORM_API_KEY=${BACKTESTING_PLATFORM_API_KEY}
+      - BACKTESTING_PLATFORM_URL=${BACKTESTING_PLATFORM_URL:-https://api.heliosprime.com/v1}
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+
+  executor:
+    build: { context: ./executor }
+    restart: unless-stopped
+    depends_on: [redis, signer, portfolio_manager]
+    ports: ["9184:9184"]
+    env_file: .env
+    environment:
+      - RUST_LOG=${LOG_LEVEL:-info}
+      - JITO_AUTH_KEYPAIR_PATH=/app/wallet/${JITO_AUTH_KEYPAIR_FILENAME}
+    volumes:
+      - ./shared:/app/shared
+      - ./${JITO_AUTH_KEYPAIR_FILENAME}:/app/wallet/${JITO_AUTH_KEYPAIR_FILENAME}:ro
+
+  position_manager:
+    build: { context: ./position_manager }
+    restart: unless-stopped
+    depends_on: [redis, executor]
+    env_file: .env
+    environment:
+      - RUST_LOG=${LOG_LEVEL:-info}
+
+  market_data_gateway:
+    build: { context: ./market_data_gateway }
+    restart: unless-stopped
+    depends_on: [redis]
+    env_file: .env
+    environment:
+      - RUST_LOG=${LOG_LEVEL:-info}
+
+  dashboard:
+    build: { context: ./dashboard }
+    restart: unless-stopped
+    depends_on: [redis, executor]
+    ports: ["8080:5000"]
+    env_file: .env
+    volumes:
+      - ./shared:/app/shared:ro
+
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    restart: unless-stopped
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:10.2.2
+    restart: unless-stopped
+    ports: ["3000:3000"]
+    volumes:
+      - grafana-storage:/var/lib/grafana
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: meme_snipe_v24
+
+volumes:
+  grafana-storage:
