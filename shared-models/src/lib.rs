@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
 // Event Types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -205,16 +204,26 @@ pub struct SignRequest {
 pub struct SignResponse {
     pub signed_transaction_b64: String,
 }
-    pub id: String,
-    pub family: String,
-    pub params: serde_json::Value,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacktestResult {
     pub spec_id: String,
+    pub strategy_id: String,
     pub sharpe_ratio: f64,
     pub total_pnl: f64,
     pub trade_count: u32,
     pub capital_tested_usd: f64,
+    pub metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+// Strategy trait for the execution engine
+use async_trait::async_trait;
+use std::collections::HashSet;
+
+#[async_trait]
+pub trait Strategy: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn subscriptions(&self) -> HashSet<EventType>;
+    async fn init(&mut self, params: &serde_json::Value) -> anyhow::Result<()>;
+    async fn on_event(&mut self, event: &MarketEvent) -> anyhow::Result<StrategyAction>;
 }

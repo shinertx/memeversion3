@@ -8,7 +8,7 @@ use tracing::info;
 use shared_models::Side;
 
 #[derive(Default, Deserialize)]
-struct BridgeInflow {
+pub struct BridgeInflow {
     min_bridge_volume_usd: f64,
     #[serde(skip)] tokens_with_recent_inflow: HashSet<String>,
 }

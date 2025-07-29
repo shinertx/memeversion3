@@ -1,0 +1,12 @@
+--- docker-compose.yml.backup
++++ docker-compose.yml
+@@ -30,9 +30,7 @@ services:
+ 
+   executor:
+-    build:
+-      context: .
+-      dockerfile: ./executor/Dockerfile
++    image: executor-nightly
+     container_name: vm25-executor-1
+     restart: unless-stopped
+     env_file: .env

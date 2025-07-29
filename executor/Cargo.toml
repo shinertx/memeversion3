@@ -1,6 +1,6 @@
 [package]
 name = "executor"
-version = "24.0.0"
+version = "25.0.0"
 edition = "2021"
 
 [dependencies]
@@ -22,7 +22,7 @@ url = "2.5"
 # Solana & Jito
 solana-client = "1.18"
 solana-sdk = "1.18"
-jito-searcher-client = { git = "https://github.com/jito-labs/searcher-client-rust.git", tag = "v0.4.0", features = ["ws"] }
+# jito-searcher-client = { git = "https://github.com/jito-labs/searcher-client-rust.git", tag = "v0.4.0", features = ["ws"] }
 
 # Database & Storage
 rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
@@ -40,11 +40,8 @@ inventory = "0.1"
 rand = "0.8"
 chrono-tz = "0.8"
 
-# Drift
-drift-sdk = { git = "https://github.com/drift-labs/drift-rs.git", tag = "v2.107.0" }
-
-[workspace]
-members = ["../shared-models"]
+# Drift (commented out for initial deployment - will re-enable for live trading)
+# drift-sdk = { git = "https://github.com/drift-labs/drift-rs.git", tag = "v2.107.0" }
 
 [profile.release]
 lto = "fat"

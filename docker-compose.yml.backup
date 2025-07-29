@@ -57,7 +57,7 @@ services:
     restart: unless-stopped
 
   executor:
-    image: executor-nightly
+    build: { context: ./executor }
     restart: unless-stopped
     depends_on: [redis, signer, portfolio_manager]
     ports: ["9184:9184"]

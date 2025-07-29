@@ -2,6 +2,7 @@
 /target
 **/*.rs.bk
 Cargo.lock
+**/target/
 
 # Python
 __pycache__/
@@ -12,6 +13,9 @@ __pycache__/
 .mypy_cache/
 .venv/
 venv/
+env/
+.env.*
+!.env.example
 
 # Local Environment & Secrets
 .env
@@ -38,7 +42,50 @@ docker-compose.override.yml
 
 # Logs
 *.log
+access.log
+error.log
+app.log
+trading.log
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Redis dumps
+dump.rdb
+appendonly.aof
+
+# Monitoring & Metrics
+prometheus_data/
+grafana_data/
 
 # Temporary files
 *.tmp
 *.temp
+*.pid
+*.lock
+
+# Trading specific
+backtest_results/
+trade_history/
+simulation_data/
+strategy_cache/
+
+# Archive files (backups/deployments)
+*.tar.gz
+*.tar
+*.zip
+*.rar
+*.7z
+*.bz2
+*.gz
+*.xz
+
+# Large data files
+*.dump
+*.sql.gz
+*.csv.gz
+*.parquet
+*.arrow

@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "shared-models",
+    "executor",
+    "signer",
+    "portfolio_manager",
+    "market_data_gateway",
+    "position_manager"
+]
+
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1.41", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+redis = { version = "0.24", features = ["tokio-comp"] }
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.11", features = ["json"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

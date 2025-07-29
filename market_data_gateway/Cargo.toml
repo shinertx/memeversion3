@@ -1,7 +1,21 @@
 [package]
 name = "market_data_gateway"
-version = "24.0.0"
+version = "25.0.0"
 edition = "2021"
 
 [dependencies]
-# Add your dependencies here
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+redis = { version = "0.24", features = ["tokio-comp"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+reqwest = { version = "0.11", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
+shared-models = { path = "../shared-models" }
+async-trait = "0.1"
+rand = "0.8"
+# Metrics collection for monitoring
+prometheus = "0.13"
+axum = "0.7"

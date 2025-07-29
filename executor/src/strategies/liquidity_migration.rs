@@ -8,7 +8,7 @@ use tracing::info;
 use shared_models::Side;
 
 #[derive(Default, Deserialize)]
-struct LiquidityMigration {
+pub struct LiquidityMigration {
     min_volume_migrate_usd: f64,
     #[serde(skip)] migrated_tokens: HashSet<String>,
 }

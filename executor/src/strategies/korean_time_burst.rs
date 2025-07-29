@@ -9,7 +9,7 @@ use chrono::{Timelike, Utc};
 use shared_models::Side;
 
 #[derive(Default, Deserialize)]
-struct KoreanTimeBurst {
+pub struct KoreanTimeBurst {
     volume_multiplier_threshold: f64,
     #[serde(skip)] active_burst_tokens: HashSet<String>,
 }

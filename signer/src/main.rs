@@ -4,10 +4,12 @@ use shared_models::{SignRequest, SignResponse};
 use solana_sdk::{
     signature::{read_keypair_file, Keypair, Signer},
     transaction::VersionedTransaction,
+    message::VersionedMessage,
 };
 use std::{env, net::SocketAddr, sync::Arc};
 use tracing::{error, info, instrument, level_filters::LevelFilter};
 use tracing_subscriber::EnvFilter;
+use base64::{Engine as _, engine::general_purpose};
 
 struct AppState {
     keypair: Keypair,
@@ -55,7 +57,7 @@ async fn sign_transaction(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SignRequest>,
 ) -> Result<Json<SignResponse>, StatusCode> {
-    let tx_bytes = match base64::decode(&request.transaction_b64) {
+    let tx_bytes = match general_purpose::STANDARD.decode(&request.transaction_b64) {
         Ok(bytes) => bytes,
         Err(e) => {
             error!(error = %e, "Failed to decode base64 transaction");
@@ -71,18 +73,14 @@ async fn sign_transaction(
         }
     };
 
-    let recent_blockhash = match tx.message.recent_blockhash() {
-        Some(bh) => *bh,
-        None => {
-            error!("No recent blockhash in transaction");
-            return Err(StatusCode::BAD_REQUEST);
-        }
+    // Get the message to sign
+    let message = match &tx.message {
+        VersionedMessage::Legacy(legacy) => legacy.serialize(),
+        VersionedMessage::V0(v0) => v0.serialize(),
     };
 
-    if let Err(e) = tx.sign(&[&state.keypair], recent_blockhash) {
-        error!(error = %e, "Failed to sign transaction");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
+    // Sign the transaction with partial signatures  
+    tx.signatures[0] = state.keypair.sign_message(&message);
 
     let signed_tx_bytes = match bincode::serialize(&tx) {
         Ok(bytes) => bytes,
@@ -94,6 +92,6 @@ async fn sign_transaction(
 
     info!("Transaction signed successfully.");
     Ok(Json(SignResponse {
-        signed_transaction_b64: base64::encode(&signed_tx_bytes),
+        signed_transaction_b64: general_purpose::STANDARD.encode(&signed_tx_bytes),
     }))
 }

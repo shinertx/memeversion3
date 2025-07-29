@@ -1,7 +1,44 @@
 global:
   scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "alert_rules.yml"
 
 scrape_configs:
   - job_name: 'executor'
     static_configs:
       - targets: ['executor:9184']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  - job_name: 'market_data_gateway'
+    static_configs:
+      - targets: ['market_data_gateway:9185']
+    metrics_path: /metrics
+    scrape_interval: 5s  # More frequent for data quality monitoring
+
+  - job_name: 'portfolio_manager'
+    static_configs:
+      - targets: ['portfolio_manager:9186']
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  - job_name: 'signer'
+    static_configs:
+      - targets: ['signer:9187']
+    metrics_path: /metrics
+    scrape_interval: 60s
+
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+# Alert rules for data validation (Red Team audit requirement)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093

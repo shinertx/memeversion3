@@ -8,7 +8,7 @@ use tracing::info;
 use shared_models::Side;
 
 #[derive(Default, Deserialize)]
-struct AirdropRotation {
+pub struct AirdropRotation {
     min_new_holders: u32,
     #[serde(skip)] token_holder_counts: HashMap<String, u32>,
 }

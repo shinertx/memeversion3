@@ -48,7 +48,7 @@ impl Config {
             pyth_api_key: env::var("PYTH_API_KEY").expect("PYTH_API_KEY must be set"),
             twitter_bearer_token: env::var("TWITTER_BEARER_TOKEN").expect("TWITTER_BEARER_TOKEN must be set"),
             drift_api_url: env::var("DRIFT_API_URL").expect("DRIFT_API_URL must be set"),
-            farcaster_api_url: env::var("FARCASATER_API_URL").expect("FARCASATER_API_URL must be set"),
+            farcaster_api_url: env::var("FARCASTER_API_URL").expect("FARCASTER_API_URL must be set"),
         }
     }
 }

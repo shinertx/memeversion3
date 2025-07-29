@@ -8,7 +8,7 @@ use tracing::info;
 use shared_models::Side;
 
 #[derive(Default, Deserialize)]
-struct PerpBasisArb {
+pub struct PerpBasisArb {
     basis_threshold_pct: f64,
     #[serde(skip)] spot_prices: HashMap<String, f64>,
     #[serde(skip)] funding_rates: HashMap<String, f64>,

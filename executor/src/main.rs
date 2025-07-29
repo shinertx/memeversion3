@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
         .from_env_lossy();
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    info!("🚀 Starting MemeSnipe v24 Executor - The Live Simulation Engine");
+    info!("🚀 Starting MemeSnipe v25 Executor - The Live Simulation Engine");
 
     let db = Arc::new(Database::new(&CONFIG.database_path)?);
     let mut master_executor = MasterExecutor::new(db.clone()).await?;

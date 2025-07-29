@@ -1,0 +1,86 @@
+# MemeSnipe v25 - Canonical Environment Configuration
+# Last Updated: 2025-07-28
+
+# === CRITICAL SECURITY & MODE ===
+# Enables paper trading. Set to 'false' for live trading (NOT RECOMMENDED).
+PAPER_TRADING_MODE=true
+# Filename for the main wallet keypair within the 'signer' service.
+WALLET_KEYPAIR_FILENAME=my_wallet.json
+# Filename for the Jito block engine authentication keypair.
+JITO_AUTH_KEYPAIR_FILENAME=jito_auth_key.json
+
+# === DOCKER NETWORKING & INTERNAL SERVICE URLS ===
+# URL for the Redis message bus. Must use the service name 'redis' for Docker networking.
+REDIS_URL=redis://redis:6379
+# Internal URL for the signer service.
+SIGNER_URL=http://signer:8989
+# Full connection string for the PostgreSQL database.
+DATABASE_URL=postgresql://postgres:memesnipe_secure_2024@postgres:5432/meme_snipe_v25
+
+# === DATA PROVIDER API KEYS ===
+# Your private Helius RPC key for Solana on-chain data.
+HELIUS_API_KEY=cb0b0046-e7ed-4538-b1ce-eb477265901a
+# Your private Neynar key for Farcaster social data.
+FARCASTER_API_KEY=F46B6C02-351C-478E-81DA-1A8561CDB790
+# Your private Twitter/X API bearer token for social sentiment.
+TWITTER_BEARER_TOKEN=AAAAAAAAAAAAAAAAAAAAAD4a2gEAAAAAb6hOFYouWlfBAJQ9ppSQXdiXpFc%3DyENww48woIwib9kGRKaZLQkEE0u75bItAybPkUbRA4Bp8zMABz
+# Placeholder for Pyth. The system currently uses the public, key-less Hermes endpoint.
+PYTH_API_KEY=demo_key_simulation_only
+
+# === EXTERNAL SERVICE URLS ===
+# Full Helius RPC URL, including your API key.
+SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=cb0b0046-e7ed-4538-b1ce-eb477265901a
+# Jito Block Engine API for MEV protection.
+JITO_RPC_URL=https://mainnet.block-engine.jito.wtf/api
+# Jupiter API for token swaps.
+JUPITER_API_URL=https://quote-api.jup.ag/v6
+# Drift Protocol API.
+DRIFT_API_URL=https://api.drift.trade
+# Neynar Farcaster API.
+FARCASTER_API_URL=https://api.neynar.com/v2
+# External platform for historical backtesting to evaluate new strategies.
+BACKTESTING_PLATFORM_URL=https://api.heliosprime.com/v1
+
+# === GENETIC ALGORITHM & STRATEGY EVOLUTION ===
+# Number of strategies in the evolving population.
+POPULATION_SIZE=50
+# Probability of crossover during breeding.
+CROSSOVER_RATE=0.7
+# Probability of mutation during breeding.
+MUTATION_RATE=0.1
+# Number of strategies selected for the breeding tournament.
+TOURNAMENT_SIZE=5
+# Minimum Sharpe ratio for a strategy to be promoted from simulation to paper trading.
+MIN_SHARPE_FOR_PROMOTION=1.5
+# How often (in seconds) to check for strategy promotions.
+STRATEGY_PROMOTION_INTERVAL_SECS=3600
+# Placeholder for the backtesting platform API key.
+BACKTESTING_PLATFORM_API_KEY=ms25_specific_backtest_key
+
+# === TRADING & RISK PARAMETERS ===
+# Starting virtual capital for paper trading.
+INITIAL_CAPITAL_USD=200.00
+# The maximum size of any single position in USD.
+GLOBAL_MAX_POSITION_USD=50.0
+# Portfolio-level stop-loss percentage.
+PORTFOLIO_STOP_LOSS_PERCENT=25.0
+# Trailing stop-loss percentage for individual positions.
+TRAILING_STOP_LOSS_PERCENT=15.0
+# Slippage tolerance in basis points (100 bps = 1%).
+SLIPPAGE_BPS=30
+# Tip for Jito block engine in lamports for priority transactions.
+JITO_TIP_LAMPORTS=10000
+
+# === MONITORING, LOGGING, & DATABASE ===
+# Application log level (e.g., info, debug, warn, error).
+LOG_LEVEL=info
+# External port for the main web dashboard.
+DASHBOARD_PORT=8080
+# External port for the Grafana monitoring dashboard.
+GRAFANA_PORT=3000
+# Password for the PostgreSQL database.
+DB_PASSWORD=memesnipe_secure_2024
+# Path within the container for the SQLite database file (if used).
+DATABASE_PATH=/app/shared/trades_v25.db
+# Path for storing historical data downloads.
+HISTORICAL_DATA_PATH=/app/shared/historical_data

@@ -19,7 +19,7 @@ struct BacktestJobResponse {
     estimated_completion_seconds: u32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct BacktestResult {
     pub job_id: String,
     pub strategy_id: String,

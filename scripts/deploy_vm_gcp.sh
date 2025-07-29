@@ -6,7 +6,7 @@ set -e
 
 # --- Configuration ---
 PROJECT_ID=$(gcloud config get-value project)
-VM_NAME="meme-snipe-v24-vm"
+VM_NAME="meme-snipe-v19-vm"
 ZONE="us-central1-a"
 MACHINE_TYPE="e2-standard-4"
 DISK_SIZE="30GB"

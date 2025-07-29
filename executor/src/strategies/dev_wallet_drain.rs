@@ -8,7 +8,7 @@ use tracing::info;
 use shared_models::Side;
 
 #[derive(Default, Deserialize)]
-struct DevWalletDrain {
+pub struct DevWalletDrain {
     dev_balance_threshold_pct: f64,
     #[serde(skip)] monitored_dev_wallets: HashSet<String>,
 }

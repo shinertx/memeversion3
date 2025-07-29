@@ -2,3 +2,12 @@
 name = "position_manager"
 version = "24.0.0"
 edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1.0"
+
+[dependencies.shared-models]
+path = "../shared-models"
