@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection};
 use shared_models::OrderDetails;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use tracing::info;
 
 #[derive(Debug, Clone)]
@@ -25,7 +26,7 @@ pub struct TradeRecord {
 }
 
 pub struct Database {
-    conn: Connection,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl Database {
@@ -37,7 +38,7 @@ impl Database {
         let conn = Connection::open(path).with_context(|| format!("Failed to open database at {}", db_path))?;
         info!("Database opened at {}", db_path);
         Self::init_db(&conn)?;
-        Ok(Self { conn })
+        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
     }
 
     fn init_db(conn: &Connection) -> Result<()> {
@@ -66,7 +67,8 @@ impl Database {
 
     pub fn log_trade_attempt(&self, details: &OrderDetails, strategy_id: &str, entry_price_usd: f64) -> Result<i64> {
         let now: DateTime<Utc> = Utc::now();
-        self.conn.execute(
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
             "INSERT INTO trades (strategy_id, token_address, symbol, amount_usd, status, entry_time, entry_price_usd, confidence, side, highest_price_usd)
              VALUES (?1, ?2, ?3, ?4, 'PENDING', ?5, ?6, ?7, ?8, ?9)",
             params![
@@ -81,17 +83,19 @@ impl Database {
                 entry_price_usd,
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(conn.last_insert_rowid())
     }
 
     pub fn open_trade(&self, trade_id: i64, signature: &str) -> Result<()> {
-        self.conn.execute("UPDATE trades SET status = 'OPEN', signature = ?1 WHERE id = ?2", params![signature, trade_id])?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE trades SET status = 'OPEN', signature = ?1 WHERE id = ?2", params![signature, trade_id])?;
         Ok(())
     }
 
     pub fn update_trade_pnl(&self, trade_id: i64, status: &str, close_price_usd: f64, pnl_usd: f64) -> Result<()> {
         let now: DateTime<Utc> = Utc::now();
-        self.conn.execute(
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
             "UPDATE trades SET status = ?1, close_time = ?2, close_price_usd = ?3, pnl_usd = ?4 WHERE id = ?5",
             params![status, now.timestamp(), close_price_usd, pnl_usd, trade_id],
         )?;
@@ -99,7 +103,8 @@ impl Database {
     }
     
     pub fn get_all_trades(&self) -> Result<Vec<TradeRecord>> {
-        let mut stmt = self.conn.prepare("SELECT * FROM trades ORDER BY entry_time DESC")?;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT * FROM trades ORDER BY entry_time DESC")?;
         let trades_iter = stmt.query_map([], |row| {
             Ok(TradeRecord {
                 id: row.get(0)?,
@@ -124,7 +129,8 @@ impl Database {
     }
 
     pub fn get_total_pnl(&self) -> Result<f64> {
-        let total: f64 = self.conn.query_row(
+        let conn = self.conn.lock().unwrap();
+        let total: f64 = conn.query_row(
             "SELECT SUM(pnl_usd) FROM trades WHERE status LIKE 'CLOSED_%'",
             [],
             |row| row.get(0),

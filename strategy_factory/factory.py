@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BACKTESTING_API_KEY = os.getenv("BACKTESTING_PLATFORM_API_KEY", "")
-BACKTESTING_API_URL = os.getenv("BACKTESTING_PLATFORM_URL", "https://api.heliosprime.com/v1")
+BACKTESTING_API_URL = os.getenv("BACKTESTING_PLATFORM_URL", "http://portfolio_manager:8084/internal_backtest")
 
 STRATEGY_FAMILIES = [
     "momentum_5m", "mean_revert_1h", "social_buzz", "liquidity_migration",
@@ -114,12 +114,13 @@ class StrategyFactory:
         }
 
     async def submit_for_backtest(self, genome: StrategyGenome) -> Optional[str]:
-        """Submit a strategy to the external backtesting platform."""
+        """Submit a strategy to our internal backtesting service."""
         spec = self.genome_to_spec(genome)
         
         try:
+            # Submit to our internal portfolio_manager backtest endpoint
             response = await self.http_client.post(
-                f"{BACKTESTING_API_URL}/backtest",
+                BACKTESTING_API_URL,
                 json={
                     "strategy_spec": spec,
                     "lookback_days": 30,
@@ -129,46 +130,60 @@ class StrategyFactory:
             
             if response.status_code == 200:
                 result = response.json()
-                job_id = result.get("job_id")
-                logger.info(f"Submitted strategy {spec['id']} for backtest, job_id: {job_id}")
+                # Internal backtesting returns results immediately
+                fitness = result.get("fitness_score", 0.5)
+                genome.fitness = fitness
                 
-                # Store the job_id for the portfolio manager to track
+                logger.info(f"Internal backtest complete for {spec['id']}: fitness={fitness}")
+                
+                # Publish result to Redis for portfolio_manager tracking
                 await self.redis_client.xadd(
-                    "backtest_jobs_submitted",
-                    {"job_id": job_id, "strategy_id": spec['id'], "spec": json.dumps(spec)}
+                    "backtest_results",
+                    {
+                        "strategy_id": spec['id'], 
+                        "fitness": str(fitness),
+                        "backtest_type": "internal",
+                        "spec": json.dumps(spec)
+                    }
                 )
                 
-                return job_id
+                return "internal_complete"
             else:
-                logger.error(f"Backtest submission failed: {response.status_code} - {response.text}")
+                logger.error(f"Internal backtest failed: {response.status_code} - {response.text}")
+                # Graceful degradation - assign default fitness
+                genome.fitness = 0.5
                 return None
                 
         except Exception as e:
-            logger.error(f"Error submitting backtest: {e}")
+            logger.error(f"Error in internal backtest: {e}")
+            # Graceful degradation - assign default fitness
+            genome.fitness = 0.5
             return None
 
     async def evaluate_fitness(self):
-        """Evaluate fitness of strategies using external backtesting API."""
-        logging.info("Evaluating fitness for current population...")
-        
-        # For paper trading mode, use simplified fitness based on existing performance
-        # In production, this would call the external backtesting API
+        """Evaluate fitness of strategies using internal backtesting."""
+        logging.info("Evaluating fitness for current population using internal backtesting...")
+
         for genome in self.population:
             try:
-                # For paper trading, always assign simulated fitness
-                import random
-                genome.fitness = random.uniform(0.5, 2.0)  # Simulated Sharpe ratio
-                logging.info(f"Strategy {genome.id} assigned fitness: {genome.fitness}")
-                
-                # Optional: Still try to submit to backtest API for logging
-                try:
-                    await self.submit_for_backtest(genome)
-                except:
-                    pass  # Ignore API failures in paper trading mode
-                    
+                # Submit to internal backtest service
+                result = await self.submit_for_backtest(genome)
+
+                if result == "internal_complete":
+                    # Fitness already set in submit_for_backtest
+                    logging.info(f"Strategy {genome.id} internal backtest complete: fitness={genome.fitness}")
+                else:
+                    # If internal backtest fails, use performance from Redis
+                    perf_data = await self.redis_client.hget("strategy_performance", genome.id)
+                    if perf_data:
+                        perf = json.loads(perf_data)
+                        genome.fitness = perf.get("sharpe_ratio", 0.5)
+                    else:
+                        genome.fitness = 0.5  # Default for new strategies
+
             except Exception as e:
                 logging.error(f"Error evaluating fitness for {genome.id}: {e}")
-                genome.fitness = random.uniform(0.5, 2.0)  # Default simulated fitness
+                genome.fitness = 0.5
 
     async def evolve_population(self):
         """Evolves the strategy population using genetic algorithm principles."""

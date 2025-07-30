@@ -1,8 +1,8 @@
-use crate::error::Result;
-use crate::jupiter_client::JupiterClient;
-use crate::models::{TradeRecord, Side};
+use anyhow::Result;
+use crate::jupiter::JupiterClient;
+use shared_models::{TradeRecord, Side};
 use crate::database::Database;
-use log::{error, info};
+use tracing::{error, info};
 use serde_json::json;
 use std::str::FromStr;
 use tokio::sync::Mutex;

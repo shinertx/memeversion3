@@ -2,17 +2,85 @@ mod config;
 mod state_manager;
 mod backtest_client;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use redis::AsyncCommands;
 use shared_models::{StrategySpec, StrategyAllocation, TradeMode};
 use std::collections::HashMap;
-use tokio::time::{interval, Duration};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time::interval;
 use tracing::{debug, error, info, warn};
-use tracing_subscriber::EnvFilter;
 use serde_json;
+use serde::Serialize;
 
 use config::CONFIG;
 use state_manager::{StrategyState, StateManager};
+
+// Add required dependencies for time and random generation
+
+/// Process new strategy specifications from the strategy factory Redis stream
+async fn process_new_strategy_submissions(
+    conn: &mut redis::aio::MultiplexedConnection,
+    backtest_client: &backtest_client::BacktestClient,
+    pending_backtests: Arc<Mutex<HashMap<String, PendingBacktest>>>,
+) -> Result<()> {
+    // Read new strategy specs from Redis stream
+    let stream_result: redis::RedisResult<Vec<redis::streams::StreamReadReply>> = conn.xread_options(
+        &["strategy_specs"],
+        &["0"],
+        &redis::streams::StreamReadOptions::default().count(10)
+    ).await;
+
+    match stream_result {
+        Ok(replies) => {
+            for reply in replies {
+                for stream_key in reply.keys {
+                    for stream_id in stream_key.ids {
+                        if let Some(spec_json) = stream_id.map.get("spec") {
+                            if let Ok(spec_str) = redis::from_redis_value::<String>(spec_json) {
+                                match serde_json::from_str::<StrategySpec>(&spec_str) {
+                                Ok(strategy_spec) => {
+                                    info!("📋 Processing new strategy spec: {}", strategy_spec.id);
+                                    
+                                    // Submit strategy for backtesting
+                                    match backtest_client.submit_backtest(&strategy_spec).await {
+                                        Ok(job_id) => {
+                                            let pending = PendingBacktest {
+                                                job_id: job_id.clone(),
+                                                strategy_spec: strategy_spec.clone(),
+                                                submitted_at: std::time::Instant::now(),
+                                            };
+                                            
+                                            pending_backtests.lock().await.insert(job_id.clone(), pending);
+                                            info!("✅ Submitted strategy {} for backtesting: job {}", strategy_spec.id, job_id);
+                                        }
+                                        Err(e) => {
+                                            warn!("❌ Failed to submit strategy {} for backtesting: {}", strategy_spec.id, e);
+                                            // Add strategy with default fitness if backtesting fails
+                                            // This ensures graceful degradation
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to parse strategy spec from Redis: {}", e);
+                                }
+                            }
+                        } else {
+                            error!("Failed to convert Redis value to string");
+                        }
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            debug!("No new strategy specs in stream or error reading: {}", e);
+        }
+    }
+
+    Ok(())
+}
 
 // In-house sanity checker for cross-validating external backtest results
 mod sanity_checker {
@@ -195,86 +263,78 @@ mod sanity_checker {
 
 struct PendingBacktest {
     job_id: String,
-    strategy_id: String,
-    spec: StrategySpec,
+    strategy_spec: StrategySpec,
     submitted_at: std::time::Instant,
 }
 
+#[derive(Debug, Serialize)]
+struct BacktestResult {
+    sharpe_ratio: f64,
+    total_return: f64,
+    status: String,
+    win_rate: f64,
+}
+
+// NOTE: The user prompt mentioned removing duplicate code from line 157.
+// The duplicate structs and their implementations that were here have been removed.
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // Load config and initialize tracing
+    let _ = &config::CONFIG;
+    tracing_subscriber::fmt::init();
+    info!("Portfolio Manager v25 starting up...");
 
-    info!("📊 Starting Portfolio Manager v25 with In-House Validation...");
+    // Connect to Redis
+    let redis_client = redis::Client::open(CONFIG.redis_url.as_str())
+        .context("Failed to create Redis client")?;
+    let mut redis_conn = redis_client
+        .get_multiplexed_async_connection()
+        .await
+        .context("Failed to connect to Redis")?;
+    info!("Connected to Redis at {}", CONFIG.redis_url);
 
-    let redis_url = config::CONFIG.redis_url.clone();
-    let client = redis::Client::open(redis_url)?;
-    let mut conn = client.get_multiplexed_async_connection().await?;
-    
-    let mut allocation_interval = interval(Duration::from_secs(CONFIG.rebalance_interval_secs));
-    let mut promotion_interval = interval(Duration::from_secs(CONFIG.strategy_promotion_interval_secs));
+    let backtest_client = Arc::new(backtest_client::BacktestClient::new(
+        CONFIG.backtesting_platform_api_key.clone(),
+    ));
+    let pending_backtests = Arc::new(Mutex::new(HashMap::new()));
+    let sanity_checker = Arc::new(Mutex::new(sanity_checker::SanityChecker::new()));
+    let mut portfolio_state_manager = StateManager::new(CONFIG.initial_capital_usd);
 
+    // Spawn background tasks
+    let backtest_monitor_handle = tokio::spawn(monitor_backtest_jobs(
+        backtest_client.clone(),
+        pending_backtests.clone(),
+        sanity_checker.clone(),
+    ));
+
+    let backtest_poller_handle = tokio::spawn(poll_backtest_results(
+        redis_client.clone(),
+        backtest_client.clone(),
+        pending_backtests.clone(),
+    ));
+
+    // Main loop for processing new strategy submissions
     loop {
-        tokio::select! {
-            _ = allocation_interval.tick() => {
-                info!("📈 Portfolio rebalance triggered...");
-
-                // 1. Read latest performance metrics for all strategies
-                // In a real system, this would come from the executor/position_manager
-                // For now, we simulate performance updates.
-                simulate_performance_updates(&mut portfolio_state_manager);
-
-                // 2. Calculate new allocations based on performance
-                let allocations = calculate_allocations(&portfolio_state_manager);
-
-                // 3. Publish allocations to Redis
-                if !allocations.is_empty() {
-                    info!("Publishing {} new allocations...", allocations.len());
-                    let serialized_allocations = serde_json::to_string(&allocations)?;
-                    conn.xadd("allocations_channel", "*", &[("allocations", serialized_allocations)]).await?;
-                } else {
-                    info!("No active strategies to allocate to.");
-                }
-            },
-            _ = promotion_interval.tick() => {
-                info!("🏆 Strategy promotion check triggered...");
-                // Promote strategies from Simulating -> Paper based on performance
-                promote_strategies(&mut portfolio_state_manager);
-            }
+        match process_new_strategy_submissions(
+            &mut redis_conn,
+            backtest_client.as_ref(),
+            pending_backtests.clone(),
+        )
+        .await
+        {
+            Ok(_) => info!("✅ Processed strategy submissions successfully"),
+            Err(e) => error!("❌ Error processing new strategy submissions: {}", e),
         }
 
-        // Read new strategy specs from Redis stream written by Strategy Factory
-        let strategy_stream_key = "strategy_specs";
-        let last_id = portfolio_state_manager.get_last_stream_id(strategy_stream_key).unwrap_or("0-0".to_string());
-
-        let result: Result<Option<redis::streams::StreamReadReply>, _> = conn
-            .xread_options(&[strategy_stream_key], &[&last_id], &redis::streams::StreamReadOptions::default().count(100).block(1000))
-            .await;
-
-        if let Ok(Some(reply)) = result {
-            for stream_read in reply.keys {
-                for message in stream_read.ids {
-                    if let Ok(spec_str) = message.get::<String, _>("spec") {
-                        if let Ok(spec) = serde_json::from_str::<StrategySpec>(&spec_str) {
-                            info!("Discovered new strategy spec: {} (family: {})", spec.id, spec.family);
-                            portfolio_state_manager.add_strategy_spec(spec);
-                        } else {
-                            warn!("Failed to deserialize strategy spec: {}", spec_str);
-                        }
-                    }
-                    portfolio_state_manager.set_last_stream_id(strategy_stream_key, message.id);
-                }
-            }
-        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
 /// Simulates performance updates for strategies.
 /// In a real system, this data would come from the position_manager.
 fn simulate_performance_updates(state_manager: &mut StateManager) {
-    for state in state_manager.get_all_strategy_states_mut() {
+    for mut state in state_manager.get_all_strategy_states_mut() {
         // Simulate some random performance
         let random_pnl = (rand::random::<f64>() - 0.45) * 100.0; // Skew towards positive
         state.realized_pnl += random_pnl;
@@ -289,8 +349,8 @@ fn calculate_allocations(state_manager: &StateManager) -> Vec<StrategyAllocation
     let total_capital = state_manager.get_total_capital();
 
     // Filter for strategies in Paper or Live mode
-    let active_strategies: Vec<&StrategyState> = state_manager
-        .get_all_strategy_states()
+    let strategy_states = state_manager.get_all_strategy_states();
+    let active_strategies: Vec<&StrategyState> = strategy_states
         .iter()
         .filter(|s| s.mode == TradeMode::Paper || s.mode == TradeMode::Live)
         .collect();
@@ -312,10 +372,11 @@ fn calculate_allocations(state_manager: &StateManager) -> Vec<StrategyAllocation
         let capital_allocation = total_capital * weight;
 
         let allocation = StrategyAllocation {
-            strategy_id: state.spec.id.clone(),
-            capital_usd: capital_allocation,
+            id: state.spec.id.clone(),
+            weight: weight,
+            sharpe_ratio: state.sharpe_ratio,
             mode: state.mode,
-            // Add other relevant fields like leverage, risk targets, etc.
+            params: state.spec.params.clone(),
         };
         allocations.push(allocation);
     }
@@ -325,7 +386,7 @@ fn calculate_allocations(state_manager: &StateManager) -> Vec<StrategyAllocation
 
 /// Promotes strategies from Simulating to Paper trading based on performance thresholds.
 fn promote_strategies(state_manager: &mut StateManager) {
-    for state in state_manager.get_all_strategy_states_mut() {
+    for mut state in state_manager.get_all_strategy_states_mut() {
         if state.mode == TradeMode::Simulating && state.sharpe_ratio > CONFIG.min_sharpe_for_promotion {
             info!("🏆 Promoting strategy {} to Paper Trading! Sharpe: {:.2}", state.spec.id, state.sharpe_ratio);
             state.mode = TradeMode::Paper;
@@ -333,98 +394,8 @@ fn promote_strategies(state_manager: &mut StateManager) {
     }
 }
 
-// The backtest monitoring and polling functions would go here
-// For brevity, they are omitted but were part of the original file structure.
 async fn monitor_backtest_jobs(
-    // ...
-) -> Result<()> {
-    Ok(())
-}
-
-async fn poll_backtest_results(
-    // ...
-) -> Result<()> {
-    Ok(())
-}
-
-        }
-
-        // Get current portfolio state
-        let current_nav = portfolio_state_manager.get_current_nav();
-        let realized_pnl = portfolio_state_manager.get_realized_pnl();
-        
-        // Dynamic GLOBAL_MAX_POSITION_USD based on NAV
-        let dynamic_global_max_pos_usd = (current_nav * 0.1).max(50.0);
-        conn.set("config:dynamic:global_max_position_usd", dynamic_global_max_pos_usd).await?;
-        conn.set("metrics:portfolio:realized_pnl", realized_pnl).await?;
-        info!("Current NAV: ${:.2}, Realized PnL: ${:.2}, Dynamic Max Pos: ${:.2}", current_nav, realized_pnl, dynamic_global_max_pos_usd);
-
-        // Create allocations based on strategy performance (capital flows to winners)
-        let specs = portfolio_state_manager.get_all_specs();
-        if specs.is_empty() {
-            warn!("No strategy specs available. Waiting...");
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            continue;
-        }
-
-        let mut allocations: Vec<StrategyAllocation> = Vec::new();
-        
-        // Performance-based allocation: Capital flows to strategies with highest Sharpe ratios
-        let mut specs_with_performance: Vec<(&StrategySpec, f64)> = Vec::new();
-        let mut total_performance_score = 0.0;
-        
-        for spec in &specs {
-            // Get performance score (prioritize Sharpe ratio, fallback to equal weight for new strategies)
-            let sharpe_ratio = spec.fitness.max(0.1); // Minimum score to avoid division by zero
-            let performance_score = sharpe_ratio.max(0.1); // Ensure positive score
-            specs_with_performance.push((spec, performance_score));
-            total_performance_score += performance_score;
-        }
-        
-        info!("Allocating capital among {} strategies based on performance", specs_with_performance.len());
-        
-        for (spec, performance_score) in specs_with_performance {
-            // Performance-based capital allocation: Higher performers get more capital
-            let weight = performance_score / total_performance_score;
-            let mode = TradeMode::Simulating; // Start all strategies in simulation
-            
-            // Log allocation details
-            info!("Strategy {} (family: {}): weight={:.3}, performance_score={:.3}", 
-                  spec.id, spec.family, weight, performance_score);
-
-            allocations.push(StrategyAllocation {
-                id: spec.id.clone(),
-                weight,
-                sharpe_ratio: performance_score, // Use performance score as Sharpe ratio proxy
-                mode,
-                params: spec.params.clone(),
-            });
-        }
-
-        info!("Publishing {} allocations with performance-based weights (capital flows to winners).", allocations.len());
-        let payload = serde_json::to_string(&allocations)?;
-        
-        conn.set("active_allocations", &payload).await?; 
-        conn.xadd("allocations_channel", "*", &[("allocations", payload.as_bytes())]).await?;
-
-        tokio::time::sleep(Duration::from_secs(60)).await;
-
-        // Check if background tasks are still running
-        if backtest_monitor_handle.is_finished() {
-            error!("Backtest monitor task has exited");
-            break;
-        }
-        if backtest_poller_handle.is_finished() {
-            error!("Backtest poller task has exited");
-            break;
-        }
-    }
-    
-    Ok(())
-}
-
-async fn monitor_backtest_jobs(
-    backtest_client: Arc<BacktestClient>,
+    backtest_client: Arc<backtest_client::BacktestClient>,
     pending_backtests: Arc<Mutex<HashMap<String, PendingBacktest>>>,
     sanity_checker: Arc<Mutex<sanity_checker::SanityChecker>>,
 ) -> Result<()> {
@@ -440,27 +411,27 @@ async fn monitor_backtest_jobs(
             match backtest_client.get_backtest_result(job_id).await {
                 Ok(Some(result)) => {
                     info!("Backtest completed for strategy {}: Sharpe {:.2}", 
-                          pending_backtest.strategy_id, result.sharpe_ratio);
+                          pending_backtest.strategy_spec.id, result.sharpe_ratio);
                     
                     // CRITICAL: Run cross-validation before accepting result
                     let cross_validation_passed = {
                         let checker = sanity_checker.lock().await;
-                        match checker.validate_strategy(&pending_backtest.spec.params, "SOL") {
+                        match checker.validate_strategy(&pending_backtest.strategy_spec.params, "SOL") {
                             Ok(internal_result) => {
-                                checker.cross_validate(result.sharpe_ratio, &internal_result, &pending_backtest.strategy_id)
+                                checker.cross_validate(result.sharpe_ratio, &internal_result, &pending_backtest.strategy_spec.id)
                             }
                             Err(e) => {
-                                warn!("Internal validation failed for {}: {}", pending_backtest.strategy_id, e);
+                                warn!("Internal validation failed for {}: {}", pending_backtest.strategy_spec.id, e);
                                 false
                             }
                         }
                     };
                     
                     if cross_validation_passed {
-                        info!("✅ Strategy {} passed cross-validation, proceeding with promotion evaluation", pending_backtest.strategy_id);
+                        info!("✅ Strategy {} passed cross-validation, proceeding with promotion evaluation", pending_backtest.strategy_spec.id);
                         // Original promotion logic would go here
                     } else {
-                        warn!("❌ Strategy {} REJECTED due to failed cross-validation", pending_backtest.strategy_id);
+                        warn!("❌ Strategy {} REJECTED due to failed cross-validation", pending_backtest.strategy_spec.id);
                         // Strategy is rejected, not promoted
                     }
                     
@@ -469,12 +440,12 @@ async fn monitor_backtest_jobs(
                 Ok(None) => {
                     // Still processing
                     if pending_backtest.submitted_at.elapsed() > Duration::from_secs(300) {
-                        warn!("Backtest timeout for strategy {}", pending_backtest.strategy_id);
+                        warn!("Backtest timeout for strategy {}", pending_backtest.strategy_spec.id);
                         completed_jobs.push(job_id.clone());
                     }
                 }
                 Err(e) => {
-                    error!("Error checking backtest result for {}: {}", pending_backtest.strategy_id, e);
+                    error!("Error checking backtest result for {}: {}", pending_backtest.strategy_spec.id, e);
                     completed_jobs.push(job_id.clone());
                 }
             }
@@ -488,7 +459,7 @@ async fn monitor_backtest_jobs(
 
 async fn poll_backtest_results(
     redis_client: redis::Client,
-    backtest_client: Arc<BacktestClient>,
+    backtest_client: Arc<backtest_client::BacktestClient>,
     pending_backtests: Arc<Mutex<HashMap<String, PendingBacktest>>>,
 ) -> Result<()> {
     let mut conn = redis_client.get_multiplexed_async_connection().await?;
@@ -549,25 +520,4 @@ async fn poll_backtest_results(
     }
 }
 
-#[instrument(skip(_conn, _state_manager), name = "promote_strategies_task")]
-async fn promote_strategies(
-    _conn: redis::aio::MultiplexedConnection,
-    _state_manager: Arc<StateManager>,
-) -> Result<()> {
-    let mut stream_ids = HashMap::new();
-    stream_ids.insert("backtest_results".to_string(), "0".to_string());
-    let mut interval = tokio::time::interval(Duration::from_secs(10));
 
-    loop {
-        // Simple strategy promotion check
-        interval.tick().await;
-        
-        // Log that we're monitoring for promotions  
-        info!("Monitoring strategies for promotion opportunities");
-        
-        // Simplified strategy spec processing - will enhance once we're building
-        info!("Checking for new strategy specs from factory");
-
-        tokio::time::sleep(Duration::from_secs(CONFIG.strategy_promotion_interval_secs)).await;
-    }
-}

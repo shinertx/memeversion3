@@ -1,11 +1,11 @@
-use crate::{register_strategy, strategies::{Strategy, MarketEvent, StrategyAction, OrderDetails, EventType}};
+use crate::strategies::{Strategy, MarketEvent, StrategyAction, OrderDetails, EventType};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{HashSet, HashMap};
-use tracing::info;
 use shared_models::Side;
+use std::collections::{HashMap, HashSet};
+use tracing::info;
 
 #[derive(Default, Deserialize)]
 pub struct AirdropRotation {
@@ -63,4 +63,3 @@ impl Strategy for AirdropRotation {
         Ok(StrategyAction::Hold)
     }
 }
-register_strategy!(AirdropRotation, "airdrop_rotation");

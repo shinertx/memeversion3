@@ -1,126 +1,216 @@
-use crate::{config::CONFIG, database::Database, jupiter::JupiterClient, signer_client, strategies, jito_client::JitoClient};
-use anyhow::{anyhow, Result};
-use shared_models::{MarketEvent, StrategyAction, StrategyAllocation, OrderDetails, EventType, Side, TradeMode};
-use solana_sdk::pubkey::Pubkey;
-use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
-use tokio::sync::mpsc::{self, Sender, Receiver};
+use crate::config::CONFIG;
+use crate::database::Database;
+use crate::jito_client::JitoClient;
+use crate::jupiter::JupiterClient;
+use crate::signer_client;
+use crate::strategies::{self, create_strategy, Strategy};
+use anyhow::{anyhow, Context, Result};
+use base64::{Engine as _, engine::general_purpose};
+use redis::AsyncCommands;
+use shared_models::{
+    MarketEvent, OrderDetails, PriceTick, Side, SolPriceEvent, SocialMention, StrategyAction,
+    StrategyAllocation, TradeMode, EventType,
+};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, instrument, warn};
-use redis::AsyncCommands;
+
 // Commented out for initial deployment - will re-enable for live trading
 // use drift_sdk::{Client as DriftClient, types::Network as DriftNet};
 use chrono::Utc;
 
 pub struct MasterExecutor {
+    strategies: HashMap<String, StrategyInfo>,
+    strategy_senders: HashMap<EventType, Vec<Sender<MarketEvent>>>,
     db: Arc<Database>,
-    active_strategies: HashMap<String, (Sender<MarketEvent>, JoinHandle<()>)>,
-    event_router_senders: HashMap<EventType, Vec<Sender<MarketEvent>>>,
     redis_client: redis::Client,
     jupiter_client: Arc<JupiterClient>,
-    sol_usd_price: Arc<tokio::sync::Mutex<f64>>,
-    portfolio_paused: Arc<tokio::sync::Mutex<bool>>,
     jito_client: Arc<JitoClient>,
-    // drift_client: Arc<tokio::sync::Mutex<Option<DriftClient>>>, // Commented out for initial deployment
+    sol_usd_price: Arc<Mutex<f64>>,
+    portfolio_paused: Arc<Mutex<bool>>,
+}
+
+struct StrategyInfo {
+    handle: JoinHandle<()>,
+    subscriptions: HashSet<EventType>,
+    mode: TradeMode,
 }
 
 impl MasterExecutor {
     pub async fn new(db: Arc<Database>) -> Result<Self> {
+        let redis_client = redis::Client::open(CONFIG.redis_url.clone())?;
+        let jupiter_client = Arc::new(JupiterClient::new());
         let jito_client = Arc::new(JitoClient::new(&CONFIG.jito_rpc_url).await?);
-        
+
         Ok(Self {
+            strategies: HashMap::new(),
+            strategy_senders: HashMap::new(),
             db,
-            active_strategies: HashMap::new(),
-            event_router_senders: HashMap::new(),
-            redis_client: redis::Client::open(CONFIG.redis_url.clone())?,
-            jupiter_client: Arc::new(JupiterClient::new()),
-            sol_usd_price: Arc::new(tokio::sync::Mutex::new(1.0)),
-            portfolio_paused: Arc::new(tokio::sync::Mutex::new(false)),
+            redis_client,
+            jupiter_client,
             jito_client,
-            // drift_client: Arc::new(tokio::sync::Mutex::new(None)), // Commented out for initial deployment
+            sol_usd_price: Arc::new(Mutex::new(0.0)),
+            portfolio_paused: Arc::new(Mutex::new(false)),
         })
     }
 
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting Master Executor run loop.");
-        
+
         let mut conn = self.redis_client.get_multiplexed_async_connection().await?;
-        let mut allocation_stream_id = HashMap::new();
-        allocation_stream_id.insert("allocations_channel".to_string(), "0".to_string());
 
-        let mut market_stream_ids = HashMap::new();
-        market_stream_ids.insert("events:price".to_string(), "0".to_string());
-        market_stream_ids.insert("events:social".to_string(), "0".to_string());
-        market_stream_ids.insert("events:depth".to_string(), "0".to_string());
-        market_stream_ids.insert("events:bridge".to_string(), "0".to_string());
-        market_stream_ids.insert("events:funding".to_string(), "0".to_string());
-        market_stream_ids.insert("events:sol_price".to_string(), "0".to_string());
-        market_stream_ids.insert("events:onchain".to_string(), "0".to_string());
-        market_stream_ids.insert("events:twitter_raw".to_string(), "0".to_string());
-        market_stream_ids.insert("events:farcaster_raw".to_string(), "0".to_string());
-
-        // Simplified polling approach for initial deployment
-        // TODO: Implement proper Redis streams when API is stable
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        // Start with empty stream IDs to read all messages
+        let mut stream_ids = HashMap::new();
+        stream_ids.insert("allocations_channel".to_string(), "0".to_string());
+        stream_ids.insert("events:price".to_string(), "0".to_string());
+        stream_ids.insert("events:social".to_string(), "0".to_string());
+        stream_ids.insert("events:depth".to_string(), "0".to_string());
+        stream_ids.insert("events:bridge".to_string(), "0".to_string());
+        stream_ids.insert("events:funding".to_string(), "0".to_string());
+        stream_ids.insert("events:sol_price".to_string(), "0".to_string());
+        stream_ids.insert("events:onchain".to_string(), "0".to_string());
 
         loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    // Basic polling logic - will enhance with streams later
-                    // Check for strategy allocation updates via Redis
-                    // For now just continue processing
-                    debug!("Processing tick - stream processing temporarily disabled");
+            // Read from all streams
+            let keys: Vec<&str> = stream_ids.keys().map(|k| k.as_str()).collect();
+            let ids: Vec<&str> = stream_ids.values().map(|v| v.as_str()).collect();
+
+            let result: redis::RedisResult<redis::streams::StreamReadReply> = conn
+                .xread_options(
+                    &keys,
+                    &ids,
+                    &redis::streams::StreamReadOptions::default()
+                        .block(1000)
+                        .count(100),
+                )
+                .await;
+
+            if let Ok(reply) = result {
+                for stream_key in reply.keys {
+                    let stream_name = stream_key.key.clone();
+
+                    for message in stream_key.ids {
+                        // Update last seen ID
+                        stream_ids.insert(stream_name.clone(), message.id.clone());
+
+                        if stream_name == "allocations_channel" {
+                            if let Some(allocations_value) = message.map.get("allocations") {
+                                if let Ok(allocations_str) = redis::from_redis_value::<String>(allocations_value) {
+                                    if let Ok(allocations) =
+                                        serde_json::from_str::<Vec<StrategyAllocation>>(
+                                            &allocations_str,
+                                        )
+                                    {
+                                        self.reconcile_strategies(allocations).await;
+                                    }
+                                }
+                            }
+                        } else if stream_name.starts_with("events:") {
+                            if let Some(event_value) = message.map.get("data") {
+                                if let Ok(event_str) = redis::from_redis_value::<String>(event_value) {
+                                if let Ok(event_data) =
+                                    serde_json::from_str::<serde_json::Value>(&event_str)
+                                {
+                                    // Parse specific event types
+                                    let event = match stream_name.as_str() {
+                                        "events:price" => {
+                                            if let Ok(tick) =
+                                                serde_json::from_value::<PriceTick>(event_data)
+                                            {
+                                                Some(MarketEvent::Price(tick))
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        "events:social" => {
+                                            if let Ok(mention) =
+                                                serde_json::from_value::<SocialMention>(event_data)
+                                            {
+                                                Some(MarketEvent::Social(mention))
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        "events:sol_price" => {
+                                            if let Ok(sol_event) =
+                                                serde_json::from_value::<SolPriceEvent>(event_data)
+                                            {
+                                                *self.sol_usd_price.lock().await =
+                                                    sol_event.price_usd;
+                                                Some(MarketEvent::SolPrice(sol_event))
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        // Add other event types...
+                                        _ => None,
+                                    };
+
+                                    if let Some(event) = event {
+                                        self.dispatch_event(&event).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    }
                 }
-                // Market event processing temporarily disabled for compilation
-                // TODO: Implement proper Redis streams for market events
             }
+
+            // Small delay to prevent tight loop
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
     async fn reconcile_strategies(&mut self, allocations: Vec<StrategyAllocation>) {
         let new_ids: HashMap<String, StrategyAllocation> = allocations.into_iter().map(|a| (a.id.clone(), a)).collect();
-        let current_ids: Vec<String> = self.active_strategies.keys().cloned().collect();
+        let current_ids: Vec<String> = self.strategies.keys().cloned().collect();
 
+        // Stop and remove deallocated strategies
         for id in current_ids.iter().filter(|id| !new_ids.contains_key(*id)) {
-            if let Some((_, handle)) = self.active_strategies.remove(id) {
-                handle.abort();
+            if let Some(strategy_info) = self.strategies.remove(id) {
+                strategy_info.handle.abort();
+                // Also remove its senders from the dispatch map
+                for event_type in strategy_info.subscriptions {
+                    if let Some(senders) = self.strategy_senders.get_mut(&event_type) {
+                        senders.retain(|s| !s.is_closed());
+                    }
+                }
                 info!(strategy = id, "Stopped strategy due to deallocation.");
-            }
-            for (_, senders) in self.event_router_senders.iter_mut() {
-                senders.retain(|s| !s.is_closed());
             }
         }
 
+        // Start new strategies
         for (id, alloc) in new_ids {
-            if !self.active_strategies.contains_key(&id) {
-                info!(strategy = id, weight = alloc.weight, mode = ?alloc.mode, "Starting new strategy.");
-                if let Some(mut strategy_instance) = self.build_strategy(&id) {
+            if !self.strategies.contains_key(&id) {
+                info!(strategy = %id, weight = alloc.weight, mode = ?alloc.mode, "Starting new strategy.");
+                if let Ok(mut strategy_instance) = create_strategy(&id) {
+                    // Initialize strategy with parameters
                     if let Err(e) = strategy_instance.init(&alloc.params).await {
-                        error!(strategy = id, error = %e, "Failed to initialize strategy, skipping.");
+                        error!("Failed to initialize strategy {}: {}", id, e);
                         continue;
                     }
-
                     let (tx, rx) = mpsc::channel(100);
                     let strategy_id_clone = id.clone();
-                    // let db_clone = self.db.clone(); // Temporarily removed for compilation
                     let jupiter_client_clone = self.jupiter_client.clone();
+                    let jito_client_clone = self.jito_client.clone();
                     let sol_usd_price_clone = self.sol_usd_price.clone();
                     let portfolio_paused_clone = self.portfolio_paused.clone();
-                    // let drift_client_clone = self.drift_client.clone(); // Commented out for initial deployment
-                    let jito_client_clone = self.jito_client.clone();
                     let redis_client_clone = self.redis_client.clone();
-                    let mode = alloc.mode.clone();
+                    let mode = alloc.mode;
+                    let subscriptions = strategy_instance.subscriptions();
 
-                    for sub_type in strategy_instance.subscriptions() {
-                        self.event_router_senders.entry(sub_type).or_default().push(tx.clone());
-                    }
-
+                    let db_clone = self.db.clone();
                     let handle = tokio::spawn(async move {
                         strategy_task(
                             strategy_instance,
                             rx,
-                            // db_clone, // Temporarily removed for compilation - will use Redis for trade logging
+                            db_clone,
                             jupiter_client_clone,
-                            // drift_client_clone, // Commented out for initial deployment
                             jito_client_clone,
                             sol_usd_price_clone,
                             portfolio_paused_clone,
@@ -129,37 +219,38 @@ impl MasterExecutor {
                             mode,
                         ).await;
                     });
-                    self.active_strategies.insert(id, (tx, handle));
+
+                    self.strategies.insert(
+                        id.clone(),
+                        StrategyInfo {
+                            handle,
+                            subscriptions: subscriptions.clone(),
+                            mode: alloc.mode,
+                        },
+                    );
+                    
+                    for event_type in subscriptions {
+                        self.strategy_senders.entry(event_type).or_default().push(tx.clone());
+                    }
+
                 } else {
                     warn!(strategy = id, "Strategy constructor not found. Skipping allocation.");
                 }
             } else {
+                // Here you could update the mode or other parameters if needed
                 info!(strategy = id, weight = alloc.weight, "Strategy already active, weight updated.");
             }
         }
     }
 
-    async fn dispatch_event(&self, event: MarketEvent) {
+    async fn dispatch_event(&self, event: &MarketEvent) {
         let event_type = event.get_type();
-        if let Some(senders) = self.event_router_senders.get(&event_type) {
+        if let Some(senders) = self.strategy_senders.get(&event_type) {
             for sender in senders {
                 if let Err(e) = sender.send(event.clone()).await {
-                    error!(event_type = ?event_type, error = %e, "Failed to dispatch event to strategy channel.");
+                    error!(?event_type, error = %e, "Failed to dispatch event to strategy channel.");
                 }
             }
-        }
-    }
-
-    fn build_strategy(&self, id: &str) -> Option<Box<dyn strategies::Strategy>> {
-        // Simple strategy factory - matches the 6 implemented strategies
-        match id {
-            s if s.starts_with("airdrop_rotation") => Some(Box::new(strategies::AirdropRotation::default())),
-            s if s.starts_with("bridge_inflow") => Some(Box::new(strategies::BridgeInflow::default())),
-            s if s.starts_with("dev_wallet_drain") => Some(Box::new(strategies::DevWalletDrain::default())),
-            s if s.starts_with("korean_time_burst") => Some(Box::new(strategies::KoreanTimeBurst::default())),
-            s if s.starts_with("liquidity_migration") => Some(Box::new(strategies::LiquidityMigration::default())),
-            s if s.starts_with("perp_basis_arb") => Some(Box::new(strategies::PerpBasisArb::default())),
-            _ => None,
         }
     }
 }
@@ -168,9 +259,8 @@ impl MasterExecutor {
 async fn strategy_task(
     mut strategy_instance: Box<dyn strategies::Strategy>,
     mut rx: Receiver<MarketEvent>,
-    // db: Arc<Database>, // Temporarily removed for compilation
+    db: Arc<Database>,
     jupiter_client: Arc<JupiterClient>,
-    // drift_client: Arc<tokio::sync::Mutex<Option<DriftClient>>>, // Commented out for initial deployment
     jito_client: Arc<JitoClient>,
     sol_usd_price: Arc<tokio::sync::Mutex<f64>>,
     portfolio_paused: Arc<tokio::sync::Mutex<bool>>,
@@ -178,7 +268,10 @@ async fn strategy_task(
     strategy_id: String,
     mode: TradeMode,
 ) {
-    info!("Strategy task started in {:?} mode.", mode);
+    info!(
+        "Strategy task started for instance: {}",
+        strategy_instance.id()
+    );
     while let Some(event) = rx.recv().await {
         if *portfolio_paused.lock().await {
             debug!("Portfolio paused. Skipping trade signal for {}.", strategy_id);
@@ -195,9 +288,8 @@ async fn strategy_task(
                     }
                     TradeMode::Paper | TradeMode::Live => {
                         if let Err(e) = execute_trade(
-                            // db.clone(), // Temporarily removed for compilation
+                            db.clone(),
                             jupiter_client.clone(),
-                            // drift_client.clone(), // Commented out for initial deployment
                             jito_client.clone(),
                             sol_usd_price.clone(),
                             details,
@@ -239,7 +331,7 @@ async fn simulate_trade(
     conn.xadd(
         &format!("shadow_ledgers:{}", strategy_id),
         "*",
-        &[("trade", serde_json::to_vec(&shadow_trade)?)]
+        &[("trade", &serde_json::to_vec(&shadow_trade)?)],
     ).await?;
     
     info!(strategy=%strategy_id, token=%details.token_address, simulated_pnl=sim_pnl, "Simulated trade recorded.");
@@ -248,16 +340,18 @@ async fn simulate_trade(
 
 #[instrument(skip_all, fields(strategy_id, token_address = %details.token_address, action = ?details.side))]
 async fn execute_trade(
-    // db: Arc<Database>, // Temporarily removed for compilation
+    db: Arc<Database>,
     jupiter: Arc<JupiterClient>,
-    // drift: Arc<tokio::sync::Mutex<Option<DriftClient>>>, // Commented out for initial deployment
     jito: Arc<JitoClient>,
     sol_price: Arc<tokio::sync::Mutex<f64>>,
     details: OrderDetails,
     strategy_id: &str,
     is_paper: bool,
 ) -> Result<()> {
-    info!("Attempting {} trade.", if is_paper { "PAPER" } else { "LIVE" });
+    info!(
+        "Executing trade for strategy {}: {:?}, Paper: {}",
+        strategy_id, details, is_paper
+    );
 
     let redis_client = redis::Client::open(CONFIG.redis_url.clone())?;
     let mut conn = redis_client.get_multiplexed_async_connection().await?;
@@ -269,138 +363,73 @@ async fn execute_trade(
         return Err(anyhow!("SOL/USD price not available or zero. Cannot size trade."));
     }
 
-    let price_quote = jupiter.get_quote(final_size_usd / current_sol_usd_price, &details.token_address).await?;
-    let current_token_price_usd = price_quote.price_per_token;
+    let current_token_price_usd = jupiter
+        .get_price(&details.token_address)
+        .await
+        .context("Failed to get current token price from Jupiter")?;
 
-    let trade_id = 1; // Temporary: db.log_trade_attempt(&details, strategy_id, current_token_price_usd)?;
-    info!(trade_id, size_usd = final_size_usd, price_usd = current_token_price_usd, "Trade attempt logged.");
+    let trade_id = db.log_trade_attempt(&details, strategy_id, current_token_price_usd)?;
 
     if is_paper {
-        info!("🧻 PAPER TRADING MODE: Simulating trade.");
-        // Temporarily disable fill simulation for compilation
-        // simulate_fill(&db, trade_id, final_size_usd, matches!(details.side, Side::Short))?;
-        info!("🧻 PAPER TRADING MODE: Trade simulation skipped for compilation.");
-    } else {
-        info!("🔥 LIVE TRADING MODE: Executing real trade.");
-        let user_pk = Pubkey::from_str(&signer_client::get_pubkey().await?)?;
-
-        if matches!(details.side, Side::Short) {
-            return Err(anyhow!("SHORT trades not yet implemented for live mode"));
-        } else {
-            let swap_tx_b64 = jupiter.get_swap_transaction(&user_pk, &details.token_address, final_size_usd).await?;
-            let signed_tx_b64 = signer_client::sign_transaction(&swap_tx_b64).await?;
-            let mut tx = crate::jupiter::deserialize_transaction(&signed_tx_b64)?;
-
-            let bh = jito.get_recent_blockhash().await?;
-            tx.message.set_recent_blockhash(bh);
-            jito.attach_tip(&mut tx, CONFIG.jito_tip_lamports).await?;
-
-            let sig = jito.send_transaction(&tx).await?;
-            info!(signature = %sig, "✅ Spot trade submitted via Jito.");
-            // Temporary: db.open_trade(trade_id, &sig.to_string())?;
-            info!(signature = %sig, "✅ Trade logged to database.");
-        }
+        info!(
+            "PAPER TRADE: Simulating fill for trade_id: {}, size_usd: {}",
+            trade_id, final_size_usd
+        );
+        simulate_fill(
+            &db,
+            trade_id,
+            final_size_usd,
+            matches!(details.side, Side::Short),
+        )?;
+        return Ok(());
     }
+
+    // Live trading logic
+    let amount_sol = final_size_usd / current_sol_usd_price;
+    let quote_response = jupiter
+        .get_quote(amount_sol, &details.token_address)
+        .await
+        .context("Failed to get quote from Jupiter")?;
+
+    // Convert quote to transaction string for signing
+    let tx_data = serde_json::to_string(&quote_response)
+        .context("Failed to serialize quote response")?;
     
-    let fill_event = serde_json::json!({
-        "trade_id": trade_id,
-        "strategy_id": strategy_id,
-        "side": details.side.to_string(),
-        "fill_price_usd": current_token_price_usd,
-        "size_usd": final_size_usd,
-        "timestamp": Utc::now().timestamp(),
-        "pnl": 0.0,
-    });
-    conn.xadd("fills_channel", "*", &[("fill", serde_json::to_vec(&fill_event)?)]).await?;
+    let signed_tx = signer_client::sign_transaction(&tx_data).await?;
+    
+    // Parse the signed transaction for Jito submission
+    let tx_bytes = general_purpose::STANDARD.decode(&signed_tx)?;
+    let transaction: solana_sdk::transaction::VersionedTransaction = 
+        bincode::deserialize(&tx_bytes)
+            .context("Failed to deserialize signed transaction")?;
+            
+    let sig = jito.send_transaction(&transaction).await?;
+
+    db.open_trade(trade_id, &sig.to_string())?;
+
+    info!(
+        "Successfully submitted live trade {} for strategy {}. Signature: {}",
+        trade_id, strategy_id, sig
+    );
     
     Ok(())
 }
 
-fn simulate_fill(id: i64, size: f64, short: bool) -> Result<()> {
-    // Enhanced simulation based on Red Team audit findings (EXEC-001)
-    // Following Copilot instructions: Role-based validation completed above
-    // Temporarily disabled database logging for compilation
-    
-    // 1. Volume-based slippage model
-    let base_slippage = match size {
-        s if s < 1000.0 => 0.001,      // 0.1% for small trades
-        s if s < 10000.0 => 0.003,     // 0.3% for medium trades  
-        s if s < 50000.0 => 0.008,     // 0.8% for large trades
-        _ => 0.02,                     // 2% for very large trades
-    };
-    
-    // 2. Add random market impact component (simulates order book depth variance)
-    let market_impact = rand::random::<f64>() * 0.005; // 0-0.5% additional impact
-    let total_slippage = base_slippage + market_impact;
-    
-    // 3. Simulate Jito bundle failure (Quant Trader concern)
-    let jito_success_rate = if size > 10000.0 { 0.75 } else { 0.90 }; // Large orders more likely to fail
-    let jito_bundle_success = rand::random::<f64>() < jito_success_rate;
-    
-    // 4. Simulate partial fill probability based on market conditions
-    let base_fill_probability = match size {
-        s if s < 1000.0 => 0.98,   // 98% fill rate for small orders
-        s if s < 10000.0 => 0.95,  // 95% fill rate for medium orders
-        s if s < 50000.0 => 0.85,  // 85% fill rate for large orders
-        _ => 0.70,                 // 70% fill rate for very large orders
-    };
-    
-    // Jito failure reduces fill probability
-    let adjusted_fill_probability = if jito_bundle_success { 
-        base_fill_probability 
-    } else { 
-        base_fill_probability * 0.6 // Failed bundles get much worse fills
-    };
-    
-    let fill_percentage = if rand::random::<f64>() < adjusted_fill_probability {
-        // Full fill
-        1.0
+fn simulate_fill(db: &Arc<Database>, id: i64, size: f64, short: bool) -> Result<()> {
+    // Simulate a fill with some slippage
+    let slippage_percent = 0.005; // 0.5%
+    let slippage_amount = size * slippage_percent;
+    let final_pnl = if short {
+        -slippage_amount
     } else {
-        // Partial fill (50-90% of intended size)
-        0.5 + rand::random::<f64>() * 0.4
+        -slippage_amount
     };
-    
-    let actual_fill_size = size * fill_percentage;
-    
-    // 5. Calculate realistic PnL with enhanced components
-    let slippage_cost = actual_fill_size * total_slippage;
-    let jito_failure_penalty = if !jito_bundle_success { actual_fill_size * 0.002 } else { 0.0 }; // 0.2% penalty for failed bundles
-    let market_pnl = actual_fill_size * (rand::random::<f64>() * 0.02 - 0.01); // ±1% market movement
-    let total_pnl = market_pnl - slippage_cost - jito_failure_penalty;
-    
-    // 6. Adjust for short positions
-    let final_pnl = if short { -total_pnl } else { total_pnl };
-    
-    let status = if final_pnl > 0.0 { "CLOSED_PROFIT" } else { "CLOSED_LOSS" };
-    
-    // 7. Enhanced logging for SRE monitoring
+    let status = "FILLED";
+    db.open_trade(id, "paper")?;
+    db.update_trade_pnl(id, status, 0.0, final_pnl)?;
     info!(
-        trade_id = id, 
-        status, 
-        pnl = final_pnl,
-        fill_percentage = fill_percentage,
-        slippage = total_slippage,
-        actual_size = actual_fill_size,
-        jito_success = jito_bundle_success,
-        jito_penalty = jito_failure_penalty,
-        market_movement = market_pnl,
-        "Enhanced paper trade simulation completed with realistic execution modeling."
+        "Simulated fill for trade {}, final PnL after slippage: {}",
+        id, final_pnl
     );
-    
-    // 8. Alert-worthy metrics for SRE (negative PnL beyond normal variance)
-    if final_pnl < -(size * 0.05) { // Alert if loss > 5% of trade size
-        warn!(
-            trade_id = id,
-            severe_loss = final_pnl,
-            size = size,
-            "Paper trade simulation shows severe loss - investigate strategy parameters"
-        );
-    }
-    
-    // Temporarily disabled database logging for compilation
-    // db.open_trade(id, "paper")?;
-    // db.update_trade_pnl(id, status, 0.0, final_pnl)?;
-    
-    info!(id, final_pnl, status, "Paper trade simulation completed");
     Ok(())
 }

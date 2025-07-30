@@ -15,6 +15,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 statrs = "0.16"
 lazy_static = "1.4.0"
 reqwest = { version = "0.11", features = ["json"] }
+rand = "0.8"
 
 [[bin]]
 name = "portfolio_manager"

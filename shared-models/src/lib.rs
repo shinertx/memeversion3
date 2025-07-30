@@ -192,6 +192,12 @@ pub struct StrategySpec {
     pub id: String,
     pub family: String,
     pub params: serde_json::Value,
+    #[serde(default = "default_fitness")]
+    pub fitness: f64,
+}
+
+fn default_fitness() -> f64 {
+    0.1 // Default fitness score for new strategies
 }
 
 // Signer Types

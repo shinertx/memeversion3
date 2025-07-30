@@ -1,7 +1,8 @@
 use crate::config::CONFIG;
 use anyhow::{anyhow, Context, Result};
+use base64::{Engine as _, engine::general_purpose};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction};
 use std::time::Duration;
 use tracing::info;
@@ -41,6 +42,7 @@ pub struct SwapResponse {
     pub swap_transaction: String,
 }
 
+#[derive(Debug, Serialize)]
 pub struct QuoteResult {
     pub out_amount: u64,
     pub price_per_token: f64,
@@ -75,6 +77,20 @@ impl JupiterClient {
         Ok(QuoteResult { out_amount, price_per_token })
     }
 
+    pub async fn get_price(&self, token_address: &str) -> Result<f64> {
+        let url = format!("{}/price?ids={}", CONFIG.jupiter_api_url, token_address);
+        
+        let response: serde_json::Value = self.client.get(&url).send().await?.json().await?;
+        
+        if let Some(price_data) = response.get("data").and_then(|d| d.get(token_address)) {
+            if let Some(price) = price_data.get("price").and_then(|p| p.as_f64()) {
+                return Ok(price);
+            }
+        }
+        
+        Err(anyhow!("Failed to get price for token {}", token_address))
+    }
+
     pub async fn get_swap_transaction(&self, user_pubkey: &Pubkey, output_mint: &str, amount_usd_to_swap: f64) -> Result<String> {
         let amount_sol_approx = amount_usd_to_swap / 150.0;
         let amount_lamports = (amount_sol_approx * 1_000_000_000.0) as u64;
@@ -99,6 +115,6 @@ impl JupiterClient {
 }
 
 pub fn deserialize_transaction(tx_b64: &str) -> Result<VersionedTransaction> {
-    let tx_bytes = base64::decode(tx_b64)?;
+    let tx_bytes = general_purpose::STANDARD.decode(tx_b64)?;
     bincode::deserialize(&tx_bytes).context("Failed to deserialize transaction")
 }

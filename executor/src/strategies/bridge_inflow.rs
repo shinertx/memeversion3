@@ -1,4 +1,4 @@
-use crate::{register_strategy, strategies::{Strategy, MarketEvent, StrategyAction, OrderDetails, EventType}};
+use crate::strategies::{Strategy, MarketEvent, StrategyAction, OrderDetails, EventType};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -51,4 +51,3 @@ impl Strategy for BridgeInflow {
         Ok(StrategyAction::Hold)
     }
 }
-register_strategy!(BridgeInflow, "bridge_inflow");

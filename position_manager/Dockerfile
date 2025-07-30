@@ -1,14 +1,44 @@
-FROM rust:1.82-slim AS builder
+FROM ruCOPY Cargo.toml .
+COPY Cargo.lock .
+COPY position_manager/Cargo.toml position_manager/Cargo.toml
+COPY shared-models/Cargo.toml shared-models/Cargo.toml
+COPY executor/Cargo.toml executor/Cargo.toml
+COPY signer/Cargo.toml signer/Cargo.toml
+COPY market_data_gateway/Cargo.toml market_data_gateway/Cargo.toml
+COPY portfolio_manager/Cargo.toml portfolio_manager/Cargo.toml
+
+RUN mkdir -p position_manager/src && echo "fn main(){}" > position_manager/src/main.rs
+RUN mkdir -p shared-models/src && echo "pub fn lib(){}" > shared-models/src/lib.rs
+RUN mkdir -p executor/src && echo "fn main(){}" > executor/src/main.rs
+RUN mkdir -p signer/src && echo "fn main(){}" > signer/src/main.rs
+RUN mkdir -p market_data_gateway/src && echo "fn main(){}" > market_data_gateway/src/main.rs
+RUN mkdir -p portfolio_manager/src && echo "fn main(){}" > portfolio_manager/src/main.rs
+
+RUN cargo build --release --workspace
+
+RUN rm position_manager/src/*.rs shared-models/src/*.rs executor/src/*.rs signer/src/*.rs market_data_gateway/src/*.rs portfolio_manager/src/*.rsm AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev
 
 WORKDIR /app
 
-COPY ./shared-models ./shared-models
-COPY ./position_manager ./position_manager
+COPY Cargo.toml .
+COPY Cargo.lock .
+COPY position_manager/Cargo.toml position_manager/Cargo.toml
+COPY shared-models/Cargo.toml shared-models/Cargo.toml
 
-RUN cd position_manager && cargo build --release
+RUN mkdir -p position_manager/src && echo "fn main() {}" > position_manager/src/main.rs
+RUN mkdir -p shared-models/src && echo "pub fn lib(){}" > shared-models/src/lib.rs
+
+RUN cargo build --release --workspace
+
+RUN rm position_manager/src/*.rs shared-models/src/*.rs
+
+COPY position_manager/src ./position_manager/src
+COPY shared-models/src ./shared-models/src
+
+RUN cargo build --release --bin position_manager
 
 FROM debian:bookworm-slim
 
@@ -20,7 +50,7 @@ RUN groupadd --system app && useradd --system --gid app app
 
 WORKDIR /app
 
-COPY --from=builder /app/position_manager/target/release/position_manager /usr/local/bin/position_manager
+COPY --from=builder /app/target/release/position_manager /usr/local/bin/position_manager
 
 USER app
 

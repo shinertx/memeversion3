@@ -208,30 +208,37 @@ async fn main() -> Result<()> {
         // Update circuit breaker metric
         metrics.circuit_breaker_active.set(if validator_guard.is_circuit_breaker_active() { 1.0 } else { 0.0 });
         
-        // Only process valid events unless circuit breaker is active
+        // Publish to Redis if valid and not circuit breaking
         if validated_event.is_valid && !validator_guard.is_circuit_breaker_active() {
-            // Serialize and publish to Redis
-            match serde_json::to_string(&validated_event.event) {
-                Ok(serialized) => {
-                    let stream_key = format!("events:{}", event.get_type().to_string());
-                    
-                    // Prepare fields for Redis
-                    let timestamp_str = validated_event.timestamp_ms.to_string();
-                    let fields = vec![
-                        ("data", serialized.as_str()),
-                        ("timestamp", timestamp_str.as_str()),
-                        ("source", validated_event.source.as_str()),
-                        ("token", event.token())
-                    ];
-                    
-                    let result: redis::RedisResult<String> = redis_conn.xadd(&stream_key, "*", &fields).await;
-                    
-                    if let Err(e) = result {
-                        error!("Failed to publish to Redis stream {}: {}", stream_key, e);
-                    }
+            match &validated_event.event {
+                MarketEvent::Price(tick) => {
+                    let event_data = serde_json::json!({
+                        "token_address": tick.token_address,
+                        "price_usd": tick.price_usd,
+                        "volume_usd_1m": tick.volume_usd_1m,
+                        "timestamp": validated_event.timestamp_ms
+                    });
+
+                    let _: () = redis_conn.xadd(
+                        "events:price",
+                        "*",
+                        &[("data", serde_json::to_string(&event_data).unwrap().as_str())],
+                    ).await.unwrap();
                 }
-                Err(e) => {
-                    error!("Failed to serialize event: {}", e);
+                // Handle other event types similarly...
+                _ => {
+                    // Generic handler for other event types for now
+                    let event_data = serde_json::to_string(&validated_event.event).unwrap();
+                    let stream_name = match validated_event.event {
+                        MarketEvent::Social(_) => "events:social",
+                        MarketEvent::Depth(_) => "events:depth",
+                        MarketEvent::Bridge(_) => "events:bridge",
+                        MarketEvent::Funding(_) => "events:funding",
+                        MarketEvent::SolPrice(_) => "events:sol_price",
+                        MarketEvent::OnChain(_) => "events:onchain",
+                        _ => "events:unknown",
+                    };
+                    let _: () = redis_conn.xadd(stream_name, "*", &[("data", event_data.as_str())]).await.unwrap();
                 }
             }
         } else if !validated_event.is_valid {
