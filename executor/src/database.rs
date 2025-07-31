@@ -67,7 +67,8 @@ impl Database {
 
     pub fn log_trade_attempt(&self, details: &OrderDetails, strategy_id: &str, entry_price_usd: f64) -> Result<i64> {
         let now: DateTime<Utc> = Utc::now();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire database lock: {}", e))?;
         conn.execute(
             "INSERT INTO trades (strategy_id, token_address, symbol, amount_usd, status, entry_time, entry_price_usd, confidence, side, highest_price_usd)
              VALUES (?1, ?2, ?3, ?4, 'PENDING', ?5, ?6, ?7, ?8, ?9)",
@@ -82,29 +83,34 @@ impl Database {
                 details.side.to_string(),
                 entry_price_usd,
             ],
-        )?;
+        ).context("Failed to insert trade attempt into database")?;
         Ok(conn.last_insert_rowid())
     }
 
     pub fn open_trade(&self, trade_id: i64, signature: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("UPDATE trades SET status = 'OPEN', signature = ?1 WHERE id = ?2", params![signature, trade_id])?;
+        let conn = self.conn.lock()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire database lock: {}", e))?;
+        conn.execute("UPDATE trades SET status = 'OPEN', signature = ?1 WHERE id = ?2", params![signature, trade_id])
+            .context("Failed to update trade status to OPEN")?;
         Ok(())
     }
 
     pub fn update_trade_pnl(&self, trade_id: i64, status: &str, close_price_usd: f64, pnl_usd: f64) -> Result<()> {
         let now: DateTime<Utc> = Utc::now();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire database lock: {}", e))?;
         conn.execute(
             "UPDATE trades SET status = ?1, close_time = ?2, close_price_usd = ?3, pnl_usd = ?4 WHERE id = ?5",
             params![status, now.timestamp(), close_price_usd, pnl_usd, trade_id],
-        )?;
+        ).context("Failed to update trade PnL")?;
         Ok(())
     }
     
     pub fn get_all_trades(&self) -> Result<Vec<TradeRecord>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT * FROM trades ORDER BY entry_time DESC")?;
+        let conn = self.conn.lock()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire database lock: {}", e))?;
+        let mut stmt = conn.prepare("SELECT * FROM trades ORDER BY entry_time DESC")
+            .context("Failed to prepare trade query")?;
         let trades_iter = stmt.query_map([], |row| {
             Ok(TradeRecord {
                 id: row.get(0)?,
@@ -123,18 +129,53 @@ impl Database {
                 side: row.get(13)?,
                 highest_price_usd: row.get(14)?,
             })
-        })?;
+        }).context("Failed to execute trade query")?;
 
-        trades_iter.collect::<Result<Vec<TradeRecord>, rusqlite::Error>>().map_err(anyhow::Error::from)
+        trades_iter.collect::<Result<Vec<TradeRecord>, rusqlite::Error>>()
+            .map_err(anyhow::Error::from)
+            .context("Failed to collect trade records")
     }
 
     pub fn get_total_pnl(&self) -> Result<f64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire database lock: {}", e))?;
         let total: f64 = conn.query_row(
-            "SELECT SUM(pnl_usd) FROM trades WHERE status LIKE 'CLOSED_%'",
+            "SELECT COALESCE(SUM(pnl_usd), 0.0) FROM trades WHERE status LIKE 'CLOSED_%'",
             [],
             |row| row.get(0),
-        )?;
+        ).context("Failed to calculate total PnL")?;
         Ok(total)
+    }
+
+    /// Get total realized PnL for circuit breaker monitoring
+    pub fn get_total_realized_pnl(&self) -> Result<f64> {
+        let conn = self.conn.lock()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire database lock: {}", e))?;
+        let total: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(pnl_usd), 0.0) FROM trades WHERE status LIKE 'CLOSED_%' AND pnl_usd IS NOT NULL",
+            [],
+            |row| row.get(0),
+        ).context("Failed to calculate total realized PnL")?;
+        Ok(total)
+    }
+
+    /// Get maximum NAV (for drawdown calculation)
+    pub fn get_max_nav(&self, initial_capital_usd: f64) -> Result<f64> {
+        let conn = self.conn.lock()
+            .map_err(|e| anyhow::anyhow!("Failed to acquire database lock: {}", e))?;
+        // For now, calculate max NAV as initial capital + max cumulative PnL
+        // In production, this should track actual NAV over time
+        let max_pnl: f64 = conn.query_row(
+            "SELECT COALESCE(MAX(running_pnl), 0.0) FROM (
+                SELECT SUM(pnl_usd) OVER (ORDER BY close_time) as running_pnl 
+                FROM trades 
+                WHERE status LIKE 'CLOSED_%' AND pnl_usd IS NOT NULL AND close_time IS NOT NULL
+                ORDER BY close_time
+            )",
+            [],
+            |row| row.get(0),
+        ).context("Failed to calculate maximum NAV")?;
+        
+        Ok(initial_capital_usd + max_pnl.max(0.0))
     }
 }

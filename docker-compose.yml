@@ -22,6 +22,7 @@ services:
       retries: 5
 
   strategy_factory:
+    build: ./strategy_factory
     image: memeversion3-strategy_factory
     volumes:
       - ./shared:/app/shared
@@ -33,8 +34,6 @@ services:
       - CROSSOVER_RATE=${CROSSOVER_RATE:-0.7}
       - TOURNAMENT_SIZE=${TOURNAMENT_SIZE:-5}
       - TOP_SURVIVORS_RATIO=${TOP_SURVIVORS_RATIO:-0.2}
-      - BACKTESTING_PLATFORM_API_KEY=${BACKTESTING_PLATFORM_API_KEY}
-      - BACKTESTING_PLATFORM_URL=${BACKTESTING_PLATFORM_URL:-https://api.heliosprime.com/v1}
     depends_on:
       - redis
       - postgres
@@ -55,21 +54,22 @@ services:
       - CAPITAL_SCALAR_PAPER=${CAPITAL_SCALAR_PAPER:-1.5}
       - CAPITAL_SCALAR_LIVE=${CAPITAL_SCALAR_LIVE:-2.0}
       - GLOBAL_MAX_POSITION_USD=${GLOBAL_MAX_POSITION_USD:-50000}
-      - BACKTESTING_PLATFORM_API_KEY=${BACKTESTING_PLATFORM_API_KEY}
-      - BACKTESTING_PLATFORM_URL=${BACKTESTING_PLATFORM_URL:-https://api.heliosprime.com/v1}
     depends_on:
       - redis
       - postgres
     restart: unless-stopped
 
   executor:
-    image: executor-nightly
+    build:
+      context: .
+      dockerfile: ./executor/Dockerfile
     restart: unless-stopped
     depends_on: [redis, signer, portfolio_manager]
     ports: ["9184:9184"]
     env_file: .env
     environment:
-      - RUST_LOG=${LOG_LEVEL:-info}
+      - RUST_LOG=${LOG_LEVEL:-debug}
+      - RUST_BACKTRACE=full
       - JITO_AUTH_KEYPAIR_PATH=/app/wallet/${JITO_AUTH_KEYPAIR_FILENAME}
     volumes:
       - ./shared:/app/shared

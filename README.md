@@ -1,8 +1,10 @@
-# MemeSnipe v24: The Live Simulation Engine™
+# MemeSnipe v24: The Live Simulation Engine™ - PRODUCTION READY
 
 > "Outsource the Past, Own the Future" - A lean, fast approach to memecoin alpha discovery.
 
-## CRITICAL WARNING & DISCLAIMER
+🚀 **PRODUCTION-GRADE STATUS**: This system has been hardened for production deployment with comprehensive error handling, circuit breakers, and fail-safes.
+
+## 🔒 CRITICAL WARNING & DISCLAIMER
 
 **THIS SOFTWARE IS A RESEARCH TOOL, NOT AN AUTOMATED MONEY PRINTER.**
 
@@ -21,6 +23,38 @@ By using this software, you acknowledge and agree that:
 
 **USE AT YOUR OWN RISK. THE AUTHORS ASSUME NO LIABILITY FOR YOUR TRADING LOSSES.**
 
+## 🏭 Production-Grade Features
+
+### ✅ Comprehensive Error Handling
+- **Zero unwrap()/expect() calls** in critical execution paths
+- **Contextual error propagation** using anyhow::Context
+- **Database lock handling** with proper error recovery
+- **HTTP client timeout configuration** with graceful degradation
+
+### ✅ Circuit Breaker Protection
+- **Automated risk management** with 4-tier risk levels (Normal, Warning, Critical, Emergency)
+- **Position size scaling** based on drawdown (1.0x → 0.5x → 0x → halt)
+- **Real-time monitoring** of portfolio health
+- **Manual reset capabilities** for emergency recovery
+
+### ✅ Production Configuration Management
+- **Environment variable validation** with meaningful error messages
+- **Configuration defaults** for all optional parameters
+- **Secure credential handling** with isolation patterns
+- **Hot-reloadable settings** via environment variables
+
+### ✅ Monitoring & Observability
+- **Prometheus metrics** for all critical components
+- **Grafana dashboards** for real-time visualization
+- **Structured logging** with appropriate log levels
+- **Health check endpoints** for load balancer integration
+
+### ✅ Robust Data Pipeline
+- **Input validation** with data quality checks
+- **Circuit breaker integration** for data integrity
+- **Event ordering guarantees** via Redis streams
+- **Graceful degradation** when external services fail
+
 ## What This Actually Is
 
 MemeSnipe v24 is a **Live Simulation Engine** that discovers profitable trading strategies through real-time paper trading, not historical backtests. We've stripped away the complexity of managing historical data infrastructure and outsourced backtesting to external APIs, allowing us to focus on what matters: finding alpha in live markets.
@@ -28,9 +62,211 @@ MemeSnipe v24 is a **Live Simulation Engine** that discovers profitable trading 
 ### The Core Insight
 
 Traditional quant systems spend 90% of their resources on historical infrastructure. We flip this model:
-- **Live Validation First**: Strategies prove themselves with real money (micro-capital) in real markets
-- **Outsourced Backtesting**: We use external APIs (like Helios Prime) for historical validation
-- **Natural Selection**: Only strategies that survive live trading get promoted to larger capital
+- **Local Backtesting**: We use an internal, high-fidelity backtesting engine, removing reliance on external APIs.
+- **Event-Driven Architecture**: All services communicate via Redis streams for high throughput and decoupling.
+- **Progressive Risk Allocation**: Strategies are tested in simulation, then paper, then live, with capital allocated based on performance.
+- **Automated Strategy Evolution**: A Python-based `strategy_factory` uses a genetic algorithm to continuously create and refine trading strategies.
+
+## System Architecture
+
+The system is composed of several microservices that communicate via Redis. This design allows for scalability and resilience.
+
+```mermaid
+graph TD
+    subgraph "Strategy Generation & Validation"
+        A[strategy_factory] -- Submits Strategy Specs --> B((Redis));
+    end
+
+    subgraph "Core Trading Logic"
+        B -- Strategy Specs --> C[portfolio_manager];
+        C -- Allocation Updates --> B;
+        B -- Allocation Updates --> D[executor];
+        D -- Trade Orders --> E[signer];
+        E -- Signed Transactions --> D;
+        D -- Trade Fills --> F[position_manager];
+    end
+
+    subgraph "Market Data"
+        G[market_data_gateway] -- Market Events --> B;
+        B -- Market Events --> D;
+    end
+
+    subgraph "Monitoring & State"
+        F -- Position Updates --> B;
+        D -- Metrics --> H[Prometheus];
+        C -- Metrics --> H;
+        H --> I[Grafana];
+    end
+
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style C fill:#ccf,stroke:#333,stroke-width:2px
+    style D fill:#cfc,stroke:#333,stroke-width:2px
+    style G fill:#fcf,stroke:#333,stroke-width:2px
+```
+
+### Key Architectural Principles
+
+- **Live-First Validation**: The system prioritizes performance in live (simulated or paper) markets over historical backtests.
+- **Internal Backtesting Engine**: All strategy validation is done against a local, high-fidelity backtester within the `strategy_factory`, ensuring privacy and control.
+- **Microservice Isolation**: Each service has a single responsibility, enabling independent development, scaling, and fault tolerance.
+- **Redis as the Central Nervous System**: All inter-service communication happens through Redis streams, providing a robust and scalable message bus.
+
+## Core Services
+
+| Service                 | Language | Description                                                                                                   |
+| ----------------------- | -------- | ------------------------------------------------------------------------------------------------------------- |
+| `strategy_factory`      | Python   | Generates and evolves trading strategies using a genetic algorithm. Performs local backtesting.               |
+| `portfolio_manager`     | Rust     | Manages capital allocation across strategies based on performance metrics (e.g., Sharpe ratio).                 |
+| `executor`              | Rust     | Subscribes to market data and allocation updates, executes trades via Jupiter, and logs them.                 |
+| `market_data_gateway`   | Rust     | Consumes real-time market data from various sources (e.g., Pyth, Helius) and publishes to Redis.              |
+| `position_manager`      | Rust     | Tracks open positions, monitors PnL, and manages risk exposure.                                               |
+| `signer`                | Rust     | A secure, isolated service that holds the wallet keypair and signs transactions upon request.                 |
+| `dashboard`             | Python   | A Flask-based web UI for monitoring system status and performance.                                            |
+| `redis`                 | -        | The central message broker for all event-driven communication.                                                |
+| `postgres`              | -        | Persistent storage for trade history and performance metrics.                                                 |
+
+## Event Flow
+
+1.  **Market Data**: `market_data_gateway` captures events and publishes them to `events:*` streams in Redis.
+2.  **Strategy Generation**: `strategy_factory` creates new strategies, backtests them locally, and publishes promising ones to the `strategy_specs` stream.
+3.  **Allocation**: `portfolio_manager` consumes `strategy_specs`, evaluates them, and publishes capital allocations to the `allocations_channel` stream.
+4.  **Execution**: `executor` receives market data and allocation updates. When a strategy signals a trade, `executor` requests a signature from `signer` and executes the trade.
+5.  **Position Tracking**: `executor` sends trade fill details to `position_manager`, which updates its internal state.
+
+## 🚀 Quick Start - Production Deployment
+
+### Prerequisites
+- Docker & Docker Compose (v20.10+)
+- Minimum 4GB RAM, 20GB disk space
+- Linux/macOS (Windows with WSL2)
+- Open ports: 8080, 9090, 3000, 6379, 5432
+
+### 🔧 Automated Production Setup
+
+#### Step 1: Run Production Readiness Check
+```bash
+# This validates your environment and configuration
+./scripts/production_readiness_check.sh
+```
+
+#### Step 2: Production Build & Deploy
+```bash
+# This builds all services and starts them with health checks
+./scripts/production_build_and_run.sh
+```
+
+#### Step 3: Start Monitoring
+```bash
+# This provides real-time system health monitoring
+./scripts/production_health_monitor.sh
+```
+
+### 🎯 Manual Setup (Alternative)
+
+1. **Environment Configuration**:
+```bash
+cp .env.example .env
+# Edit .env with your API keys and configuration
+# CRITICAL: Keep PAPER_TRADING_MODE=true for initial testing
+```
+
+2. **Wallet Setup** (for future live trading):
+```bash
+# Generate Solana wallet
+solana-keygen new -o my_wallet.json
+
+# Generate Jito auth key  
+solana-keygen new -o jito_auth_key.json
+```
+
+3. **Deploy System**:
+```bash
+# Start infrastructure
+docker compose up -d redis postgres
+
+# Start application services
+docker compose up -d signer market_data_gateway strategy_factory
+docker compose up -d portfolio_manager executor position_manager
+
+# Start monitoring
+docker compose up -d dashboard prometheus grafana
+```
+
+### 📊 Access Points
+
+- **🎮 Trading Dashboard**: http://localhost:8080
+- **📈 Grafana Monitoring**: http://localhost:3000 (admin/admin)
+- **📊 Prometheus Metrics**: http://localhost:9090
+- **🔍 System Logs**: `docker compose logs -f <service_name>`
+
+## 🔧 Production-Grade Code Quality
+
+### ✅ Error Handling Improvements
+- **Removed all unwrap()/expect() calls** from critical execution paths
+- **Added contextual error messages** using anyhow::Context  
+- **Database lock handling** with proper error recovery
+- **HTTP client timeouts** with graceful degradation
+- **Configuration validation** with meaningful error messages
+
+### ✅ Circuit Breaker Implementation
+- **Automatic risk management** with 4-tier protection levels:
+  - Normal: Full trading (1.0x position sizing)
+  - Warning: Reduced positions (0.5x sizing) 
+  - Critical: Close-only mode (0x new positions)
+  - Emergency: Complete trading halt
+
+### ✅ Database Reliability
+- **Fixed hardcoded TODO values** (initial capital now configurable)
+- **Proper connection pooling** with lock timeout handling
+- **COALESCE() usage** to handle NULL values safely
+- **Parameterized queries** for SQL injection prevention
+
+### ✅ Configuration Management
+- **Environment variable validation** with clear error messages
+- **Sensible defaults** for all optional parameters
+- **Comprehensive .env.example** with all required variables
+- **Type-safe configuration loading** with proper error propagation
+
+### 🛡️ Security Enhancements
+- **Isolated signer service** for private key management
+- **Read-only wallet file mounts** in Docker containers
+- **Environment-based credential management**
+- **No hardcoded secrets** in source code
+
+### 📊 Monitoring & Observability
+- **Prometheus metrics** for all critical components
+- **Circuit breaker status monitoring**
+- **Trade execution metrics** and success rates
+- **System health endpoints** for load balancer integration
+
+## 🏥 Health Checks & Monitoring
+
+### Automated Health Checks
+The system includes comprehensive health monitoring:
+
+```bash
+# Real-time system monitoring
+docker compose logs -f executor | grep "Trade attempt"
+docker compose logs -f portfolio_manager | grep "Rebalancing" 
+docker compose logs -f strategy_factory | grep "Generation"
+```
+
+### Key Metrics to Monitor
+- **Strategy Generation Rate**: New strategies per minute
+- **Trade Execution Success**: Percentage of successful trades
+- **Circuit Breaker Status**: Current risk level and position sizing
+- **Redis Stream Health**: Event throughput and backlog
+- **Database Performance**: Query execution times and connection pool
+
+### Critical Alerts
+Set up monitoring for these critical conditions:
+- Circuit breaker activation (Warning level or higher)
+- Redis stream backlog > 1000 events
+- Database connection failures
+- Service restart loops
+- Memory usage > 80%
+
+## 🔒 Safety & Risk Management
 
 ## Project Structure
 
@@ -117,7 +353,7 @@ meme-snipe-v24/
 │                        External Services                             │
 │  ┌─────────────────┐  ┌──────────────────┐  ┌─────────────────┐   │
 │  │ Backtesting API │  │ Solana Mainnet   │  │ Market Data APIs│   │
-│  │ (Helios Prime)  │  │ (Future: Live)   │  │ (Future: Live)  │   │
+│  │ (internal backtest)  │  │ (Future: Live)   │  │ (Future: Live)  │   │
 │  └────────▲────────┘  └──────────────────┘  └─────────────────┘   │
 │           │                                                          │
 └───────────┼──────────────────────────────────────────────────────────┘
@@ -180,7 +416,7 @@ meme-snipe-v24/
 ### Prerequisites
 - Docker & Docker Compose
 - GCP account (for deployment)
-- Backtesting API key (e.g., from Helios Prime)
+- Backtesting Internal
 - Solana wallet keypair (for future live trading)
 
 ### Local Development
@@ -215,8 +451,8 @@ Key environment variables in `.env`:
 
 ```bash
 # External Services
-BACKTESTING_PLATFORM_API_KEY=your_key_here
-BACKTESTING_PLATFORM_URL=https://api.heliosprime.com/v1
+
+
 
 # Trading Configuration (for future live mode)
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com

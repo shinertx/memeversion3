@@ -1,5 +1,5 @@
-use lazy_static::lazy_static;
 use std::env;
+use anyhow::{Context, Result};
 
 pub struct Config {
     pub paper_trading_mode: bool,
@@ -26,33 +26,56 @@ pub struct Config {
 }
 
 impl Config {
-    fn load() -> Self {
-        Self {
+    pub fn load() -> Result<Self> {
+        println!("Loading configuration...");
+        
+        let config = Self {
             paper_trading_mode: env::var("PAPER_TRADING_MODE").unwrap_or_else(|_| "true".to_string()) == "true",
-            wallet_keypair_filename: env::var("WALLET_KEYPAIR_FILENAME").expect("WALLET_KEYPAIR_FILENAME must be set"),
-            jito_auth_keypair_filename: env::var("JITO_AUTH_KEYPAIR_FILENAME").expect("JITO_AUTH_KEYPAIR_FILENAME must be set"),
-            solana_rpc_url: env::var("SOLANA_RPC_URL").expect("SOLANA_RPC_URL must be set"),
-            jito_rpc_url: env::var("JITO_RPC_URL").expect("JITO_RPC_URL must be set"),
-            signer_url: env::var("SIGNER_URL").expect("SIGNER_URL must be set"),
-            initial_capital_usd: env::var("INITIAL_CAPITAL_USD").expect("INITIAL_CAPITAL_USD must be set").parse().unwrap(),
-            global_max_position_usd: env::var("GLOBAL_MAX_POSITION_USD").expect("GLOBAL_MAX_POSITION_USD must be set").parse().unwrap(),
-            portfolio_stop_loss_percent: env::var("PORTFOLIO_STOP_LOSS_PERCENT").expect("PORTFOLIO_STOP_LOSS_PERCENT must be set").parse().unwrap(),
-            trailing_stop_loss_percent: env::var("TRAILING_STOP_LOSS_PERCENT").expect("TRAILING_STOP_LOSS_PERCENT must be set").parse().unwrap(),
-            jupiter_api_url: env::var("JUPITER_API_URL").expect("JUPITER_API_URL must be set"),
-            slippage_bps: env::var("SLIPPAGE_BPS").expect("SLIPPAGE_BPS must be set").parse().unwrap(),
-            jito_tip_lamports: env::var("JITO_TIP_LAMPORTS").expect("JITO_TIP_LAMPORTS must be set").parse().unwrap(),
-            database_path: env::var("DATABASE_PATH").expect("DATABASE_PATH must be set"),
-            historical_data_path: env::var("HISTORICAL_DATA_PATH").expect("HISTORICAL_DATA_PATH must be set"),
-            redis_url: env::var("REDIS_URL").expect("REDIS_URL must be set"),
-            helius_api_key: env::var("HELIUS_API_KEY").expect("HELIUS_API_KEY must be set"),
-            pyth_api_key: env::var("PYTH_API_KEY").expect("PYTH_API_KEY must be set"),
-            twitter_bearer_token: env::var("TWITTER_BEARER_TOKEN").expect("TWITTER_BEARER_TOKEN must be set"),
-            drift_api_url: env::var("DRIFT_API_URL").expect("DRIFT_API_URL must be set"),
-            farcaster_api_url: env::var("FARCASTER_API_URL").expect("FARCASTER_API_URL must be set"),
-        }
+            wallet_keypair_filename: env::var("WALLET_KEYPAIR_FILENAME").context("WALLET_KEYPAIR_FILENAME must be set")?,
+            jito_auth_keypair_filename: env::var("JITO_AUTH_KEYPAIR_FILENAME").context("JITO_AUTH_KEYPAIR_FILENAME must be set")?,
+            solana_rpc_url: env::var("SOLANA_RPC_URL").context("SOLANA_RPC_URL must be set")?,
+            jito_rpc_url: env::var("JITO_RPC_URL").context("JITO_RPC_URL must be set")?,
+            signer_url: env::var("SIGNER_URL").context("SIGNER_URL must be set")?,
+            initial_capital_usd: env::var("INITIAL_CAPITAL_USD")
+                .context("INITIAL_CAPITAL_USD must be set")?
+                .parse()
+                .context("INITIAL_CAPITAL_USD must be a valid number")?,
+            global_max_position_usd: env::var("GLOBAL_MAX_POSITION_USD")
+                .context("GLOBAL_MAX_POSITION_USD must be set")?
+                .parse()
+                .context("GLOBAL_MAX_POSITION_USD must be a valid number")?,
+            portfolio_stop_loss_percent: env::var("PORTFOLIO_STOP_LOSS_PERCENT")
+                .context("PORTFOLIO_STOP_LOSS_PERCENT must be set")?
+                .parse()
+                .context("PORTFOLIO_STOP_LOSS_PERCENT must be a valid number")?,
+            trailing_stop_loss_percent: env::var("TRAILING_STOP_LOSS_PERCENT")
+                .context("TRAILING_STOP_LOSS_PERCENT must be set")?
+                .parse()
+                .context("TRAILING_STOP_LOSS_PERCENT must be a valid number")?,
+            jupiter_api_url: env::var("JUPITER_API_URL").context("JUPITER_API_URL must be set")?,
+            slippage_bps: env::var("SLIPPAGE_BPS")
+                .context("SLIPPAGE_BPS must be set")?
+                .parse()
+                .context("SLIPPAGE_BPS must be a valid number")?,
+            jito_tip_lamports: env::var("JITO_TIP_LAMPORTS")
+                .context("JITO_TIP_LAMPORTS must be set")?
+                .parse()
+                .context("JITO_TIP_LAMPORTS must be a valid number")?,
+            database_path: env::var("DATABASE_PATH").context("DATABASE_PATH must be set")?,
+            historical_data_path: env::var("HISTORICAL_DATA_PATH").context("HISTORICAL_DATA_PATH must be set")?,
+            redis_url: env::var("REDIS_URL").context("REDIS_URL must be set")?,
+            helius_api_key: env::var("HELIUS_API_KEY").unwrap_or_else(|_| "demo_key".to_string()),
+            pyth_api_key: env::var("PYTH_API_KEY").unwrap_or_else(|_| "demo_key".to_string()),
+            twitter_bearer_token: env::var("TWITTER_BEARER_TOKEN").unwrap_or_else(|_| "demo_token".to_string()),
+            drift_api_url: env::var("DRIFT_API_URL").unwrap_or_else(|_| "https://api.drift.trade".to_string()),
+            farcaster_api_url: env::var("FARCASTER_API_URL").unwrap_or_else(|_| "https://api.neynar.com/v2".to_string()),
+        };
+        
+        println!("Configuration loaded successfully");
+        println!("Paper trading mode: {}", config.paper_trading_mode);
+        println!("Redis URL: {}", config.redis_url);
+        println!("Signer URL: {}", config.signer_url);
+        
+        Ok(config)
     }
-}
-
-lazy_static! {
-    pub static ref CONFIG: Config = Config::load();
 }

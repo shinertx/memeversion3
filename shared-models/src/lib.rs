@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+pub mod circuit_breaker;
+pub use circuit_breaker::*;
+
 // Event Types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EventType {

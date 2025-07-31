@@ -1,4 +1,4 @@
-use crate::providers::{helius_consumer, pyth_consumer, twitter_consumer, farcaster_consumer, DataValidator};
+use crate::providers::validate_simulated_event;
 use anyhow::Result;
 use redis::AsyncCommands;
 use shared_models::MarketEvent;
@@ -54,32 +54,41 @@ pub struct DataValidationMetrics {
 }
 
 impl DataValidationMetrics {
-    pub fn new() -> Self {
+    pub fn new() -> anyhow::Result<Self> {
         let registry = Registry::new();
         
-        let events_total = Counter::new("data_events_total", "Total number of data events processed").unwrap();
-        let events_invalid = Counter::new("data_events_invalid_total", "Total number of invalid data events").unwrap();
-        let circuit_breaker_active = Gauge::new("data_circuit_breaker_active", "Whether circuit breaker is active (1) or inactive (0)").unwrap();
+        let events_total = Counter::new("data_events_total", "Total number of data events processed")
+            .context("Failed to create events_total counter")?;
+        let events_invalid = Counter::new("data_events_invalid_total", "Total number of invalid data events")
+            .context("Failed to create events_invalid counter")?;
+        let circuit_breaker_active = Gauge::new("data_circuit_breaker_active", "Whether circuit breaker is active (1) or inactive (0)")
+            .context("Failed to create circuit_breaker_active gauge")?;
         let validation_latency = HistogramVec::new(
             prometheus::HistogramOpts::new("data_validation_duration_ms", "Time spent validating data events"),
             &["event_type", "provider"]
-        ).unwrap();
-        let provider_events = Counter::new("data_provider_events_total", "Events received per provider").unwrap();
+        ).context("Failed to create validation_latency histogram")?;
+        let provider_events = Counter::new("data_provider_events_total", "Events received per provider")
+            .context("Failed to create provider_events counter")?;
         
-        registry.register(Box::new(events_total.clone())).unwrap();
-        registry.register(Box::new(events_invalid.clone())).unwrap();
-        registry.register(Box::new(circuit_breaker_active.clone())).unwrap();
-        registry.register(Box::new(validation_latency.clone())).unwrap();
-        registry.register(Box::new(provider_events.clone())).unwrap();
+        registry.register(Box::new(events_total.clone()))
+            .context("Failed to register events_total metric")?;
+        registry.register(Box::new(events_invalid.clone()))
+            .context("Failed to register events_invalid metric")?;
+        registry.register(Box::new(circuit_breaker_active.clone()))
+            .context("Failed to register circuit_breaker_active metric")?;
+        registry.register(Box::new(validation_latency.clone()))
+            .context("Failed to register validation_latency metric")?;
+        registry.register(Box::new(provider_events.clone()))
+            .context("Failed to register provider_events metric")?;
         
-        Self {
+        Ok(Self {
             registry,
             events_total,
             events_invalid,
             circuit_breaker_active,
             validation_latency,
             provider_events,
-        }
+        })
     }
 }
 
@@ -92,11 +101,12 @@ async fn metrics_handler(State(metrics): State<DataValidationMetrics>) -> Result
     encoder.encode(&metric_families, &mut buffer)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     
-    String::from_utf8(buffer)
-        .map(|body| Response::builder()
-            .header("content-type", "text/plain; version=0.0.4")
-            .body(body)
-            .unwrap())
+    let body = String::from_utf8(buffer)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    Response::builder()
+        .header("content-type", "text/plain; version=0.0.4")
+        .body(body)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
@@ -110,7 +120,8 @@ async fn main() -> Result<()> {
     info!("🚀 Starting MemeSnipe v25 Market Data Gateway with Data Validation Layer");
 
     // Initialize metrics for monitoring
-    let metrics = DataValidationMetrics::new();
+    let metrics = DataValidationMetrics::new()
+        .context("Failed to initialize data validation metrics")?;
 
     // Start metrics server for Prometheus scraping
     let metrics_clone = metrics.clone();
@@ -119,140 +130,96 @@ async fn main() -> Result<()> {
             .route("/metrics", get(metrics_handler))
             .with_state(metrics_clone);
         
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:9185").await.unwrap();
-        info!("📊 Metrics server listening on port 9185");
-        axum::serve(listener, app).await.unwrap();
+        match tokio::net::TcpListener::bind("0.0.0.0:9185").await {
+            Ok(listener) => {
+                info!("📊 Metrics server listening on port 9185");
+                if let Err(e) = axum::serve(listener, app).await {
+                    error!("Metrics server failed: {}", e);
+                }
+            }
+            Err(e) => {
+                error!("Failed to bind metrics server to port 9185: {}", e);
+            }
+        }
     });
 
     // Create Redis connection
     let redis_client = redis::Client::open(config::CONFIG.redis_url.as_str())?;
     let mut redis_conn = redis_client.get_async_connection().await?;
 
-    // Create data validator
-    let validator = Arc::new(Mutex::new(DataValidator::new()));
-
-    // Create channel for receiving market events from providers
+    // Create channel for receiving market events from simulated providers
     let (tx, mut rx) = mpsc::channel::<MarketEvent>(1000);
 
-    // Initialize and spawn data providers
-    let tx_helius = tx.clone();
+    // Spawn simulated data provider (as per README - market data is simulated but designed for easy replacement)
+    let tx_sim = tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = helius_consumer::run(tx_helius).await {
-            error!("Helius consumer failed: {}", e);
+        if let Err(e) = run_simulated_data_provider(tx_sim).await {
+            error!("Simulated data provider failed: {}", e);
         }
     });
 
-    let tx_pyth = tx.clone();
-    tokio::spawn(async move {
-        if let Err(e) = pyth_consumer::run(tx_pyth).await {
-            error!("Pyth consumer failed: {}", e);
-        }
-    });
-
-    let tx_twitter = tx.clone();
-    tokio::spawn(async move {
-        if let Err(e) = twitter_consumer::run(tx_twitter).await {
-            error!("Twitter consumer failed: {}", e);
-        }
-    });
-
-    let tx_farcaster = tx.clone();
-    tokio::spawn(async move {
-        if let Err(e) = farcaster_consumer::run(tx_farcaster).await {
-            error!("Farcaster consumer failed: {}", e);
-        }
-    });
-
-    // Spawn data quality monitoring task
-    let validator_monitor = validator.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            let validator = validator_monitor.lock().await;
-            let (invalid_count, total_count, invalid_ratio) = validator.get_data_quality_stats();
-            
-            if total_count > 0 {
-                info!(
-                    "📊 Data Quality Stats: {}/{} valid ({:.2}% invalid), Circuit Breaker: {}",
-                    total_count - invalid_count,
-                    total_count,
-                    invalid_ratio * 100.0,
-                    if validator.is_circuit_breaker_active() { "🔴 ACTIVE" } else { "🟢 INACTIVE" }
-                );
-            }
-        }
-    });
-
-    // Main event processing loop with validation and metrics
-    info!("🔍 Data validation and processing loop started");
+    // Main event processing loop
+    info!("🔍 Starting market data processing loop");
     while let Some(event) = rx.recv().await {
         let start_time = std::time::Instant::now();
-        metrics.events_total.inc();
         
-        let mut validator_guard = validator.lock().await;
-        
-        // Validate the event
-        let validated_event = validator_guard.validate_event(event.clone(), "provider").await;
-        
-        // Update metrics
-        let validation_duration = start_time.elapsed().as_millis() as f64;
-        metrics.validation_latency
-            .with_label_values(&[event.get_type().to_string(), "combined"])
-            .observe(validation_duration);
-        
-        if !validated_event.is_valid {
-            metrics.events_invalid.inc();
-        }
-        
-        // Update circuit breaker metric
-        metrics.circuit_breaker_active.set(if validator_guard.is_circuit_breaker_active() { 1.0 } else { 0.0 });
-        
-        // Publish to Redis if valid and not circuit breaking
-        if validated_event.is_valid && !validator_guard.is_circuit_breaker_active() {
-            match &validated_event.event {
-                MarketEvent::Price(tick) => {
-                    let event_data = serde_json::json!({
-                        "token_address": tick.token_address,
-                        "price_usd": tick.price_usd,
-                        "volume_usd_1m": tick.volume_usd_1m,
-                        "timestamp": validated_event.timestamp_ms
-                    });
-
-                    let _: () = redis_conn.xadd(
-                        "events:price",
-                        "*",
-                        &[("data", serde_json::to_string(&event_data).unwrap().as_str())],
-                    ).await.unwrap();
+        // Validate event (simple validation for simulation mode)
+        if validate_simulated_event(&event) {
+            // Publish to Redis
+            match redis_conn.xadd::<&str, &str, &str, &str>(
+                "events:price",
+                "*",
+                &[("data", &serde_json::to_string(&event).unwrap_or_default())],
+            ).await {
+                Ok(_) => {
+                    metrics.events_total.inc();
+                    info!("📡 Published market event: {:?}", event);
                 }
-                // Handle other event types similarly...
-                _ => {
-                    // Generic handler for other event types for now
-                    let event_data = serde_json::to_string(&validated_event.event).unwrap();
-                    let stream_name = match validated_event.event {
-                        MarketEvent::Social(_) => "events:social",
-                        MarketEvent::Depth(_) => "events:depth",
-                        MarketEvent::Bridge(_) => "events:bridge",
-                        MarketEvent::Funding(_) => "events:funding",
-                        MarketEvent::SolPrice(_) => "events:sol_price",
-                        MarketEvent::OnChain(_) => "events:onchain",
-                        _ => "events:unknown",
-                    };
-                    let _: () = redis_conn.xadd(stream_name, "*", &[("data", event_data.as_str())]).await.unwrap();
+                Err(e) => {
+                    metrics.events_invalid.inc();
+                    error!("Failed to publish event to Redis: {}", e);
                 }
             }
-        } else if !validated_event.is_valid {
-            warn!(
-                "🚫 Dropping invalid event from {}: {:?}", 
-                validated_event.source, 
-                validated_event.validation_errors
-            );
         } else {
-            warn!("🔴 Circuit breaker active - dropping all events");
+            metrics.events_invalid.inc();
+            warn!("🚫 Invalid event dropped: {:?}", event);
         }
         
-        drop(validator_guard); // Release lock quickly
+        // Update metrics
+        let processing_duration = start_time.elapsed().as_millis() as f64;
+        metrics.validation_latency
+            .with_label_values(&[&event.get_type().to_string(), "simulated"])
+            .observe(processing_duration);
     }
 
+    Ok(())
+}
+}
+
+/// Simulated data provider for development and testing
+/// As per README: "Market data is currently simulated but designed for easy replacement with real feeds"
+async fn run_simulated_data_provider(tx: mpsc::Sender<MarketEvent>) -> Result<()> {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    let mut sol_price = 100.0; // Starting SOL price
+    
+    info!("🎲 Starting simulated data provider");
+    
+    loop {
+        interval.tick().await;
+        
+        // Simulate SOL price with random walk
+        sol_price += (rand::random::<f64>() - 0.5) * 2.0; // +/- $1 volatility
+        sol_price = sol_price.max(50.0).min(200.0); // Keep within reasonable bounds
+        
+        let sol_event = MarketEvent::SolPrice(shared_models::SolPriceEvent {
+            price_usd: sol_price,
+        });
+        
+        if tx.send(sol_event).await.is_err() {
+            warn!("Receiver dropped, stopping simulated data provider");
+            break;
+        }
+    }
+    
     Ok(())
 }

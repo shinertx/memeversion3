@@ -1,4 +1,5 @@
-use crate::register_strategy;
+// Incomplete strategy stub - not currently used
+// use crate::register_strategy;
 use crate::strategies::Strategy;
 use anyhow::Result;
 use async_trait::async_trait;

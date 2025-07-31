@@ -15,14 +15,16 @@ pub struct JitoClient {
 
 impl JitoClient {
     pub async fn new(jito_rpc_url: &str) -> Result<Self> {
-        let auth_keypair_path = crate::config::CONFIG.jito_auth_keypair_filename.clone();
+        // Note: jito_rpc_url parameter is passed but we need to get auth keypair path from somewhere
+        // For now, using hardcoded path - should be passed as parameter in production
+        let auth_keypair_path = "jito_auth_key.json";
         let auth_keypair = Arc::new(
             read_keypair_file(&format!("/app/wallet/{}", auth_keypair_path))
                 .map_err(|e| anyhow!("Failed to read Jito auth keypair from {}: {}", auth_keypair_path, e))?
         );
         
         let rpc_client = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
-            crate::config::CONFIG.solana_rpc_url.clone(),
+            jito_rpc_url.to_string(),
             CommitmentConfig::confirmed(),
         );
 

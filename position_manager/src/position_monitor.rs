@@ -1,9 +1,10 @@
 use anyhow::Result;
 use crate::jupiter::JupiterClient;
-use shared_models::{TradeRecord, Side};
-use crate::database::Database;
+use crate::database::{Database, TradeRecord};
+use shared_models::Side;
 use tracing::{error, info};
-use serde_json::json;
+use redis::AsyncCommands;
+use redis::streams::StreamReadOptions;
 use std::str::FromStr;
 use tokio::sync::Mutex;
 use std::sync::Arc;
@@ -15,20 +16,62 @@ use solana_sdk::pubkey::Pubkey;
 pub async fn run_monitor(db: Arc<Database>) -> Result<()> {
     info!("📈 Starting Position Manager v24...");
     
+    // Initialize Jupiter client
+    let jupiter_client = Arc::new(JupiterClient::new("https://quote-api.jup.ag/v6".to_string()));
+    
+    // Initialize price tracking
+    let current_prices = Arc::new(Mutex::new(HashMap::new()));
+    let sol_usd_price = Arc::new(Mutex::new(50.0)); // Default SOL price
+    
+    // Initialize Redis connection for market data
+    let redis_client = redis::Client::open(CONFIG.redis_url.clone())?;
+    let mut redis_conn = redis_client.get_multiplexed_async_connection().await?;
+    
     let mut market_stream_ids = HashMap::new();
 
     loop {
-        // Fetch and process market events
-        match jupiter_client.get_market_events().await {
-            Ok(events) => {
-                for event_bytes in events {
-                    if let Ok(event) = serde_json::from_slice::<shared_models::SolPriceEvent>(event_bytes) {
-                        *sol_usd_price.lock().await = event.price_usd;
+        // Listen for market events from Redis streams with timeout to avoid blocking forever
+        let result = tokio::time::timeout(
+            Duration::from_millis(1000),
+            redis_conn.xread_options::<_, _, redis::streams::StreamReadReply>(
+                &["events:price", "events:sol_price"], 
+                &["0", "0"],
+                &StreamReadOptions::default().block(100).count(10)
+            )
+        ).await;
+
+        match result {
+            Ok(Ok(streams)) => {
+                for stream_key in streams.keys {
+                    let stream_name = &stream_key.key;
+                    
+                    for stream_msg in stream_key.ids {
+                        if stream_name == "events:sol_price" {
+                            if let Some(data_bytes) = stream_msg.map.get("data") {
+                                if let Ok(data_str) = redis::from_redis_value::<String>(data_bytes) {
+                                    if let Ok(event) = serde_json::from_str::<shared_models::SolPriceEvent>(&data_str) {
+                                        *sol_usd_price.lock().await = event.price_usd;
+                                    }
+                                }
+                            }
+                        } else if stream_name == "events:price" {
+                            if let Some(data_bytes) = stream_msg.map.get("data") {
+                                if let Ok(data_str) = redis::from_redis_value::<String>(data_bytes) {
+                                    if let Ok(event) = serde_json::from_str::<shared_models::PriceTick>(&data_str) {
+                                        current_prices.lock().await.insert(event.token_address.clone(), event.price_usd);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        market_stream_ids.insert(stream_name.clone(), stream_msg.id.clone());
                     }
                 }
-                market_stream_ids.insert(stream_name, String::from_utf8_lossy(&id.id).to_string());
             }
-            Err(e) => error!("Error reading from market event stream: {}", e),
+            Ok(Err(e)) => error!("Redis stream error: {}", e),
+            Err(_) => {
+                // Timeout - this is normal, continue to position checking
+            }
         }
 
         // Check open positions
@@ -89,8 +132,8 @@ async fn execute_close_trade(
 ) -> Result<()> {
     info!("Executing close trade for trade_id: {}", trade.id);
     
-    let user_pk = Pubkey::from_str(&signer_client::get_pubkey(&CONFIG.signer_url).await?)?;
-    let current_sol_price = *sol_price.lock().await;
+    let user_pk = Pubkey::from_str(&crate::signer_client::get_pubkey(&CONFIG.signer_url).await?)?;
+    let _current_sol_price = *sol_price.lock().await;
 
     let pnl_usd = if trade.side == Side::Long.to_string() {
         (close_price_usd - trade.entry_price_usd) * (trade.amount_usd / trade.entry_price_usd)
@@ -102,11 +145,11 @@ async fn execute_close_trade(
         let swap_tx_b64 = jupiter.get_swap_transaction(
             &user_pk, 
             &trade.token_address, 
-            "So11111111111111111111111111111111111111112", 
+            "So11111111111111111111111111111111111111112", // SOL mint
             trade.amount_usd, 
             30
         ).await?;
-        let signed_tx_b64 = signer_client::sign_transaction(&CONFIG.signer_url, &swap_tx_b64).await?;
+        let _signed_tx_b64 = crate::signer_client::sign_transaction(&CONFIG.signer_url, &swap_tx_b64).await?;
         info!("Position closed via Jupiter swap");
     } else {
         info!("Closing SHORT position via Drift (simulated)");
@@ -118,8 +161,8 @@ async fn execute_close_trade(
 
     // Publish PnL to Redis
     let redis_client = redis::Client::open(CONFIG.redis_url.clone())?;
-    let mut conn = redis_client.get_async_connection().await?;
-    conn.xadd(
+    let mut conn = redis_client.get_multiplexed_async_connection().await?;
+    let _: () = conn.xadd(
         "metrics:portfolio:realized_pnl_stream", 
         "*", 
         &[("pnl", pnl_usd.to_string().as_bytes())]

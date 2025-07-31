@@ -68,4 +68,12 @@ impl Database {
         )?;
         Ok(())
     }
+
+    pub fn update_trade_pnl(&self, trade_id: i64, status: &str, close_price: f64, pnl: f64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE trades SET status = ?1, close_price_usd = ?2, pnl_usd = ?3, closed_at = CURRENT_TIMESTAMP WHERE id = ?4",
+            params![status, close_price, pnl, trade_id],
+        )?;
+        Ok(())
+    }
 }

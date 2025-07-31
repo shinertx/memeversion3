@@ -5,7 +5,8 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-COPY Cargo.lock /Cargo.lock
+COPY Cargo.toml Cargo.toml
+COPY Cargo.lock Cargo.lock
 COPY portfolio_manager/Cargo.toml portfolio_manager/Cargo.toml
 COPY shared-models/Cargo.toml shared-models/Cargo.toml
 

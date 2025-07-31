@@ -1,4 +1,3 @@
-use crate::config::CONFIG;
 use anyhow::{anyhow, Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use reqwest::Client;
@@ -7,7 +6,7 @@ use solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction};
 use std::time::Duration;
 use tracing::info;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JupiterQuote {
     pub out_amount: String,
@@ -15,14 +14,14 @@ pub struct JupiterQuote {
     pub market_infos: Vec<MarketInfo>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarketInfo {
     pub lp_fee: LpFee,
     pub liquidity: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LpFee {
     pub amount: String,
@@ -53,51 +52,54 @@ pub struct JupiterClient {
 }
 
 impl JupiterClient {
-    pub fn new() -> Self {
-        Self {
-            client: Client::builder().timeout(Duration::from_secs(15)).build().unwrap(),
-        }
+    pub fn new() -> Result<Self> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .context("Failed to create HTTP client for Jupiter")?;
+        
+        Ok(Self { client })
     }
 
-    pub async fn get_quote(&self, amount_sol_to_swap: f64, output_mint: &str) -> Result<QuoteResult> {
-        let amount_lamports = (amount_sol_to_swap * 1_000_000_000.0) as u64;
-        let url = format!(
-            "{}/quote?inputMint=So11111111111111111111111111111111111111112&outputMint={}&amount={}&slippageBps={}",
-            CONFIG.jupiter_api_url, output_mint, amount_lamports, CONFIG.slippage_bps
+    pub async fn get_quote(&self, amount_sol: f64, output_mint: &str) -> Result<JupiterQuote> {
+        // Hardcoded for now - should be passed as parameter
+        let slippage_bps = 30;
+        
+        let input_mint = "So11111111111111111111111111111111111111112"; // SOL mint
+        let amount_lamports = (amount_sol * 1_000_000_000.0) as u64;
+
+        let quote_url = format!(
+            "https://quote-api.jup.ag/v6/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}",
+            input_mint, output_mint, amount_lamports, slippage_bps
         );
 
-        let response: JupiterQuoteResponse = self.client.get(&url).send().await?.json().await?;
-        let best_route = response.data.first().ok_or_else(|| anyhow!("No route found by Jupiter for {}", output_mint))?;
-        
-        let out_amount: u64 = best_route.out_amount.parse()?;
-        let price_per_token = amount_sol_to_swap / (out_amount as f64 / 1_000_000_000.0);
-        
-        info!("Jupiter quote for {} SOL -> {}. Price per token: {:.8} USD", amount_sol_to_swap, output_mint, price_per_token);
-
-        Ok(QuoteResult { out_amount, price_per_token })
+        let response: JupiterQuote = self.client.get(&quote_url).send().await?.json().await?;
+        Ok(response)
     }
 
-    pub async fn get_price(&self, token_address: &str) -> Result<f64> {
-        let url = format!("{}/price?ids={}", CONFIG.jupiter_api_url, token_address);
+    pub async fn get_price(&self, token_mint: &str) -> Result<f64> {
+        // Hardcoded jupiter URL for now
+        let jupiter_url = "https://quote-api.jup.ag/v6";
+        let url = format!("{}/price?ids={}", jupiter_url, token_mint);
         
         let response: serde_json::Value = self.client.get(&url).send().await?.json().await?;
         
-        if let Some(price_data) = response.get("data").and_then(|d| d.get(token_address)) {
+        if let Some(price_data) = response.get("data").and_then(|d| d.get(token_mint)) {
             if let Some(price) = price_data.get("price").and_then(|p| p.as_f64()) {
                 return Ok(price);
             }
         }
         
-        Err(anyhow!("Failed to get price for token {}", token_address))
+        Err(anyhow!("Failed to get price for token {}", token_mint))
     }
 
-    pub async fn get_swap_transaction(&self, user_pubkey: &Pubkey, output_mint: &str, amount_usd_to_swap: f64) -> Result<String> {
+    pub async fn get_swap_transaction(&self, user_pubkey: &Pubkey, output_mint: &str, amount_usd_to_swap: f64, slippage_bps: u16) -> Result<String> {
         let amount_sol_approx = amount_usd_to_swap / 150.0;
         let amount_lamports = (amount_sol_approx * 1_000_000_000.0) as u64;
 
         let quote_url = format!(
-            "{}/quote?inputMint=So11111111111111111111111111111111111111112&outputMint={}&amount={}&slippageBps={}",
-            CONFIG.jupiter_api_url, output_mint, amount_lamports, CONFIG.slippage_bps
+            "https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint={}&amount={}&slippageBps={}",
+            output_mint, amount_lamports, slippage_bps
         );
         let quote_response: serde_json::Value = self.client.get(&quote_url).send().await?.json().await?;
         
@@ -107,7 +109,7 @@ impl JupiterClient {
             "wrapAndUnwrapSol": true,
         });
 
-        let swap_url = format!("{}/swap", CONFIG.jupiter_api_url);
+        let swap_url = "https://quote-api.jup.ag/v6/swap";
         let response: SwapResponse = self.client.post(swap_url).json(&swap_payload).send().await?.json().await?;
         info!("Generated Jupiter swap transaction for {} USD.", amount_usd_to_swap);
         Ok(response.swap_transaction)

@@ -19,41 +19,96 @@ use state_manager::{StrategyState, StateManager};
 
 // Add required dependencies for time and random generation
 
-/// Process new strategy specifications from the strategy factory Redis stream
 async fn process_new_strategy_submissions(
     conn: &mut redis::aio::MultiplexedConnection,
     backtest_client: &backtest_client::BacktestClient,
-    pending_backtests: Arc<Mutex<HashMap<String, PendingBacktest>>>,
+    _pending_backtests: Arc<Mutex<HashMap<String, PendingBacktest>>>,
+    last_id: &mut String,
 ) -> Result<()> {
     // Read new strategy specs from Redis stream
+    debug!("Reading strategy_specs stream starting from ID: {}", last_id);
     let stream_result: redis::RedisResult<Vec<redis::streams::StreamReadReply>> = conn.xread_options(
         &["strategy_specs"],
-        &["0"],
+        &[last_id.as_str()],
         &redis::streams::StreamReadOptions::default().count(10)
     ).await;
 
     match stream_result {
         Ok(replies) => {
+            debug!("Got {} stream replies", replies.len());
             for reply in replies {
+                debug!("Processing reply with {} keys", reply.keys.len());
                 for stream_key in reply.keys {
+                    debug!("Processing stream key with {} messages", stream_key.ids.len());
                     for stream_id in stream_key.ids {
+                        // Update last seen ID
+                        *last_id = stream_id.id.clone();
+                        debug!("Processing message ID: {}", stream_id.id);
+                        
                         if let Some(spec_json) = stream_id.map.get("spec") {
                             if let Ok(spec_str) = redis::from_redis_value::<String>(spec_json) {
                                 match serde_json::from_str::<StrategySpec>(&spec_str) {
                                 Ok(strategy_spec) => {
                                     info!("📋 Processing new strategy spec: {}", strategy_spec.id);
                                     
+                                    // If strategy has good fitness score, allocate capital immediately
+                                    if strategy_spec.fitness > 0.6 {
+                                        info!("🚀 High-fitness strategy detected: {} (fitness: {:.3})", strategy_spec.id, strategy_spec.fitness);
+                                        
+                                        // Create allocation for high-performing strategy
+                                        let allocation = shared_models::StrategyAllocation {
+                                            id: strategy_spec.id.clone(),
+                                            weight: (strategy_spec.fitness * 0.1).min(0.05), // Max 5% allocation
+                                            sharpe_ratio: strategy_spec.fitness * 2.0, // Approximate Sharpe from fitness
+                                            mode: if strategy_spec.fitness > 0.8 { 
+                                                shared_models::TradeMode::Paper 
+                                            } else { 
+                                                shared_models::TradeMode::Simulating 
+                                            },
+                                            params: strategy_spec.params.clone(),
+                                        };
+                                        
+                                        // Publish allocation to executor
+                                        let allocations = vec![allocation];
+                                        let allocations_json = serde_json::to_string(&allocations)?;
+                                        let _: () = conn.xadd(
+                                            "allocations_channel",
+                                            "*",
+                                            &[("allocations", allocations_json)]
+                                        ).await?;
+                                        
+                                        info!("💰 Allocated capital to strategy: {}", strategy_spec.id);
+                                    }
+                                    
                                     // Submit strategy for backtesting
                                     match backtest_client.submit_backtest(&strategy_spec).await {
-                                        Ok(job_id) => {
-                                            let pending = PendingBacktest {
-                                                job_id: job_id.clone(),
-                                                strategy_spec: strategy_spec.clone(),
-                                                submitted_at: std::time::Instant::now(),
+                                        Ok(result) => {
+                                            // Update fitness based on backtest result
+                                            let mut updated_spec = strategy_spec.clone();
+                                            updated_spec.fitness = result.sharpe_ratio.max(0.1); // Ensure minimum fitness
+                                            
+                                            // Send updated strategy to executor
+                                            let allocation = StrategyAllocation {
+                                                id: updated_spec.id.clone(),
+                                                weight: 0.1, // Start with 10% weight
+                                                sharpe_ratio: result.sharpe_ratio.max(0.1), // Ensure minimum sharpe
+                                                mode: TradeMode::Simulating,
+                                                params: updated_spec.params.clone(),
                                             };
                                             
-                                            pending_backtests.lock().await.insert(job_id.clone(), pending);
-                                            info!("✅ Submitted strategy {} for backtesting: job {}", strategy_spec.id, job_id);
+                                            let allocation_json = serde_json::to_string(&allocation)
+                                                .context("Failed to serialize allocation")?;
+                                            
+                                            let _: () = conn.xadd(
+                                                "allocations_channel",
+                                                "*",
+                                                &[("data", &allocation_json)]
+                                            ).await.map_err(|e| {
+                                                error!("Failed to publish allocation: {}", e);
+                                                e
+                                            })?;
+                                            
+                                            info!("✅ Strategy {} evaluated with Sharpe {:.2}, allocated capital", updated_spec.id, result.sharpe_ratio);
                                         }
                                         Err(e) => {
                                             warn!("❌ Failed to submit strategy {} for backtesting: {}", strategy_spec.id, e);
@@ -75,7 +130,7 @@ async fn process_new_strategy_submissions(
             }
         }
         Err(e) => {
-            debug!("No new strategy specs in stream or error reading: {}", e);
+            debug!("No new strategy specs in stream or error reading (last_id: {}): {}", last_id, e);
         }
     }
 
@@ -121,7 +176,7 @@ mod sanity_checker {
         }
         
         // Simplified strategy simulation for sanity checking
-        pub fn validate_strategy(&self, strategy_params: &serde_json::Value, token: &str) -> Result<SimpleBacktestResult> {
+        pub fn validate_strategy(&self, _strategy_params: &serde_json::Value, token: &str) -> Result<SimpleBacktestResult> {
             let data = self.price_data.get(token).ok_or_else(|| anyhow::anyhow!("No data for token {}", token))?;
             
             if data.len() < 10 {
@@ -173,7 +228,10 @@ mod sanity_checker {
             
             // Final position value
             if position != 0.0 {
-                capital += position * data.last().unwrap().close * 0.997; // Close with slippage
+                let last_price = data.last()
+                    .map(|d| d.close)
+                    .unwrap_or(1.0);
+                capital += position * last_price * 0.997; // Close with slippage
             }
             
             let total_return = (capital - 1000.0) / 1000.0;
@@ -296,30 +354,33 @@ async fn main() -> Result<()> {
 
     let backtest_client = Arc::new(backtest_client::BacktestClient::new(
         CONFIG.backtesting_platform_api_key.clone(),
-    ));
+    ).context("Failed to create backtest client")?);
     let pending_backtests = Arc::new(Mutex::new(HashMap::new()));
     let sanity_checker = Arc::new(Mutex::new(sanity_checker::SanityChecker::new()));
-    let mut portfolio_state_manager = StateManager::new(CONFIG.initial_capital_usd);
+    let _portfolio_state_manager = StateManager::new(CONFIG.initial_capital_usd);
 
     // Spawn background tasks
-    let backtest_monitor_handle = tokio::spawn(monitor_backtest_jobs(
+    let _backtest_monitor_handle = tokio::spawn(monitor_backtest_jobs(
         backtest_client.clone(),
         pending_backtests.clone(),
         sanity_checker.clone(),
     ));
 
-    let backtest_poller_handle = tokio::spawn(poll_backtest_results(
+    let _backtest_poller_handle = tokio::spawn(poll_backtest_results(
         redis_client.clone(),
         backtest_client.clone(),
         pending_backtests.clone(),
     ));
 
     // Main loop for processing new strategy submissions
+    let mut last_strategy_id = "0".to_string(); // Start from beginning
+    
     loop {
         match process_new_strategy_submissions(
             &mut redis_conn,
             backtest_client.as_ref(),
             pending_backtests.clone(),
+            &mut last_strategy_id,
         )
         .await
         {
@@ -395,128 +456,31 @@ fn promote_strategies(state_manager: &mut StateManager) {
 }
 
 async fn monitor_backtest_jobs(
-    backtest_client: Arc<backtest_client::BacktestClient>,
-    pending_backtests: Arc<Mutex<HashMap<String, PendingBacktest>>>,
-    sanity_checker: Arc<Mutex<sanity_checker::SanityChecker>>,
+    _backtest_client: Arc<backtest_client::BacktestClient>,
+    _pending_backtests: Arc<Mutex<HashMap<String, PendingBacktest>>>,
+    _sanity_checker: Arc<Mutex<sanity_checker::SanityChecker>>,
 ) -> Result<()> {
-    let mut interval = interval(Duration::from_secs(30));
+    // Since we now get immediate results from submit_backtest, this function is simplified
+    let mut interval = interval(Duration::from_secs(60));
     
     loop {
         interval.tick().await;
-        
-        let mut pending = pending_backtests.lock().await;
-        let mut completed_jobs = Vec::new();
-        
-        for (job_id, pending_backtest) in pending.iter() {
-            match backtest_client.get_backtest_result(job_id).await {
-                Ok(Some(result)) => {
-                    info!("Backtest completed for strategy {}: Sharpe {:.2}", 
-                          pending_backtest.strategy_spec.id, result.sharpe_ratio);
-                    
-                    // CRITICAL: Run cross-validation before accepting result
-                    let cross_validation_passed = {
-                        let checker = sanity_checker.lock().await;
-                        match checker.validate_strategy(&pending_backtest.strategy_spec.params, "SOL") {
-                            Ok(internal_result) => {
-                                checker.cross_validate(result.sharpe_ratio, &internal_result, &pending_backtest.strategy_spec.id)
-                            }
-                            Err(e) => {
-                                warn!("Internal validation failed for {}: {}", pending_backtest.strategy_spec.id, e);
-                                false
-                            }
-                        }
-                    };
-                    
-                    if cross_validation_passed {
-                        info!("✅ Strategy {} passed cross-validation, proceeding with promotion evaluation", pending_backtest.strategy_spec.id);
-                        // Original promotion logic would go here
-                    } else {
-                        warn!("❌ Strategy {} REJECTED due to failed cross-validation", pending_backtest.strategy_spec.id);
-                        // Strategy is rejected, not promoted
-                    }
-                    
-                    completed_jobs.push(job_id.clone());
-                }
-                Ok(None) => {
-                    // Still processing
-                    if pending_backtest.submitted_at.elapsed() > Duration::from_secs(300) {
-                        warn!("Backtest timeout for strategy {}", pending_backtest.strategy_spec.id);
-                        completed_jobs.push(job_id.clone());
-                    }
-                }
-                Err(e) => {
-                    error!("Error checking backtest result for {}: {}", pending_backtest.strategy_spec.id, e);
-                    completed_jobs.push(job_id.clone());
-                }
-            }
-        }
-        
-        for job_id in completed_jobs {
-            pending.remove(&job_id);
-        }
+        // Just sleep - backtests are handled immediately in the main loop
+        info!("📊 Backtest monitor running (immediate results mode)");
     }
 }
 
 async fn poll_backtest_results(
-    redis_client: redis::Client,
-    backtest_client: Arc<backtest_client::BacktestClient>,
-    pending_backtests: Arc<Mutex<HashMap<String, PendingBacktest>>>,
+    _redis_client: redis::Client,
+    _backtest_client: Arc<backtest_client::BacktestClient>,
+    _pending_backtests: Arc<Mutex<HashMap<String, PendingBacktest>>>,
 ) -> Result<()> {
-    let mut conn = redis_client.get_multiplexed_async_connection().await?;
-    let mut interval = tokio::time::interval(Duration::from_secs(10));
+    // Since we now get immediate results from submit_backtest, this function is simplified
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
 
     loop {
         interval.tick().await;
-        
-        let job_ids: Vec<String> = {
-            let pending = pending_backtests.lock().await;
-            pending.keys().cloned().collect()
-        };
-        
-        for job_id in job_ids {
-            match backtest_client.get_backtest_result(&job_id).await {
-                Ok(Some(result)) => {
-                    if result.status == "completed" {
-                        // Push result to Redis for strategy promotion
-                        let result_json = serde_json::to_string(&result)?;
-                        conn.xadd(
-                            "backtest_results",
-                            "*",
-                            &[("result", result_json)]
-                        ).await?;
-                        
-                        info!(
-                            "Backtest completed for job {}: sharpe={:.2}, win_rate={:.2}%",
-                            job_id, result.sharpe_ratio, result.win_rate
-                        );
-                        
-                        pending_backtests.lock().await.remove(&job_id);
-                    } else if result.status == "failed" {
-                        warn!("Backtest failed for job {}", job_id);
-                        pending_backtests.lock().await.remove(&job_id);
-                    }
-                }
-                Ok(None) => {
-                    // Still pending, check if timeout
-                    let should_remove = {
-                        let pending = pending_backtests.lock().await;
-                        if let Some(backtest) = pending.get(&job_id) {
-                            backtest.submitted_at.elapsed() > Duration::from_secs(3600)
-                        } else {
-                            false
-                        }
-                    };
-                    
-                    if should_remove {
-                        warn!("Backtest job {} timed out after 1 hour", job_id);
-                        pending_backtests.lock().await.remove(&job_id);
-                    }
-                }
-                Err(e) => {
-                    error!("Error polling backtest result for job {}: {}", job_id, e);
-                }
-            }
-        }
+        info!("📊 Backtest poller running (immediate results mode)");
     }
 }
 

@@ -17,7 +17,7 @@ COPY market_data_gateway/Cargo.toml ./market_data_gateway/
 COPY position_manager/Cargo.toml ./position_manager/
 
 # Create stub files for dependency build
-RUN mkdir -p shared-models/src && echo "fn main() {}" > shared-models/src/lib.rs
+RUN mkdir -p shared-models/src && echo "// Stub for dependency build" > shared-models/src/lib.rs
 RUN mkdir -p signer/src && echo "fn main() {}" > signer/src/main.rs  
 RUN mkdir -p portfolio_manager/src && echo "fn main() {}" > portfolio_manager/src/main.rs
 RUN mkdir -p market_data_gateway/src && echo "fn main() {}" > market_data_gateway/src/main.rs
